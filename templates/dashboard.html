@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Engineering Productivity Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+    <style>
+        .metric-card {
+            padding: 20px;
+            margin: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .project-metrics {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .filter-section {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        .filter-section .form-group {
+            min-width: 200px;
+        }
+        .select2-container--default .select2-selection--multiple {
+            border-radius: 4px;
+            border: 1px solid #ced4da;
+            min-height: 38px;
+        }
+        .select2-container--default .select2-selection--multiple .select2-selection__choice {
+            background-color: #e9ecef;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            padding: 2px 8px;
+            margin: 4px;
+        }
+        .select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+            margin-right: 5px;
+            color: #6c757d;
+        }
+        .select2-container--default .select2-results__option[aria-selected=true] {
+            background-color: #e9ecef;
+        }
+        .filter-label {
+            font-weight: 500;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <div class="d-flex justify-content-between align-items-start mb-4">
+            <h1>Engineering Productivity Dashboard</h1>
+            <div class="filter-section">
+                <div class="form-group">
+                    <label class="filter-label">Time Range</label>
+                    <select class="form-select" id="timeRange">
+                        <option value="7d" {% if current_range == '7d' %}selected{% endif %}>Last 7 Days</option>
+                        <option value="1m" {% if current_range == '1m' %}selected{% endif %}>Last Month</option>
+                        <option value="3m" {% if current_range == '3m' %}selected{% endif %}>Last 3 Months</option>
+                        <option value="6m" {% if current_range == '6m' %}selected{% endif %}>Last 6 Months</option>
+                        <option value="all" {% if current_range == 'all' %}selected{% endif %}>All Time</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="filter-label">Projects</label>
+                    <select class="form-select" id="projectSelect" multiple>
+                        <option value="ALL" {% if selected_projects|length == 5 %}selected{% endif %}>All</option>
+                        <option value="THC" {% if 'THC' in selected_projects %}selected{% endif %}>THC</option>
+                        <option value="TEC" {% if 'TEC' in selected_projects %}selected{% endif %}>TEC</option>
+                        <option value="TP" {% if 'TP' in selected_projects %}selected{% endif %}>TP</option>
+                        <option value="TWCP" {% if 'TWCP' in selected_projects %}selected{% endif %}>TWCP</option>
+                        <option value="TPO" {% if 'TPO' in selected_projects %}selected{% endif %}>TPO</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row">
+            {% for engineer, data in engineers_data.items() %}
+            <div class="col-md-6 mb-4">
+                <div class="metric-card">
+                    <h3>{{ engineer }}</h3>
+                    <div class="row">
+                        <div class="col">
+                            <h5>Overall Metrics</h5>
+                            <p><strong>Original Estimate:</strong> {{ "%.2f"|format(data.total_estimate) }} hrs</p>
+                            <p><strong>Logged Time:</strong> {{ "%.2f"|format(data.total_logged) }} hrs</p>
+                            <p><strong>Idle Time:</strong> {{ "%.2f"|format(data.idle_time) }} hrs</p>
+                            <p><strong>Current Work:</strong> {{ "%.2f"|format(data.current_work) }} hrs</p>
+                            <p><strong>Bandwidth:</strong> {{ "%.2f"|format(data.bandwidth) }}%</p>
+                        </div>
+                    </div>
+                    
+                    <div class="project-metrics">
+                        <h5>Project-wise Metrics</h5>
+                        {% for project, project_data in data.projects.items() %}
+                        <div class="mt-3">
+                            <h6>{{ project }}</h6>
+                            <div class="row">
+                                <div class="col">
+                                    <p><small>Estimate: {{ "%.2f"|format(project_data.total_estimate) }} hrs</small></p>
+                                    <p><small>Logged: {{ "%.2f"|format(project_data.total_logged) }} hrs</small></p>
+                                </div>
+                                <div class="col">
+                                    <p><small>Idle: {{ "%.2f"|format(project_data.idle_time) }} hrs</small></p>
+                                    <p><small>Bandwidth: {{ "%.2f"|format(project_data.bandwidth) }}%</small></p>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    <script>
+    $(document).ready(function() {
+        // Initialize Select2 for projects
+        $('#projectSelect').select2({
+            placeholder: 'Select Projects',
+            closeOnSelect: false,
+            allowClear: true,
+            templateResult: formatProject,
+            templateSelection: formatProjectSelection
+        });
+
+        // Initialize Select2 for time range
+        $('#timeRange').select2({
+            minimumResultsForSearch: Infinity
+        });
+
+        // Handle All option
+        $('#projectSelect').on('select2:select select2:unselect', function(e) {
+            let selected = $(this).val() || [];
+            if(e.params.data.id === 'ALL') {
+                if(e.type === 'select2:select') {
+                    // If "All" is selected, select all options but show only ALL
+                    $(this).find('option').prop('selected', true);
+                    hideIndividualSelections();
+                }
+            } else {
+                // If individual project is selected/unselected, handle "All" option
+                let allOption = $(this).find('option[value="ALL"]');
+                if(selected.length === 5) {
+                    allOption.prop('selected', true);
+                    hideIndividualSelections();
+                } else {
+                    allOption.prop('selected', false);
+                    showIndividualSelections();
+                }
+            }
+            updateProjects();
+        });
+
+        // Handle time range change
+        $('#timeRange').on('change', function() {
+            window.location.href = updateQueryParam('time_range', this.value);
+        });
+
+        // Initialize visibility based on current selection
+        if($('#projectSelect').val()?.length === 6) { // 5 projects + ALL
+            hideIndividualSelections();
+        }
+    });
+
+    function formatProject(project) {
+        if (!project.id) return project.text;
+        return $('<span>' + project.text + '</span>');
+    }
+
+    function formatProjectSelection(project) {
+        if (!project.id) return project.text;
+        if (project.id === 'ALL') return 'All';
+        return project.text;
+    }
+
+    function hideIndividualSelections() {
+        $('.select2-selection__choice').each(function() {
+            if ($(this).attr('title') !== 'All') {
+                $(this).hide();
+            }
+        });
+    }
+
+    function showIndividualSelections() {
+        $('.select2-selection__choice').show();
+    }
+
+    function updateQueryParam(key, value) {
+        let searchParams = new URLSearchParams(window.location.search);
+        searchParams.set(key, value);
+        return '?' + searchParams.toString();
+    }
+
+    function updateProjects() {
+        let selected = $('#projectSelect').val() || [];
+        // Always send All in query if ALL is selected
+        if (selected.includes('ALL')) {
+            selected = ['THC', 'TEC', 'TP', 'TWCP', 'TPO'];
+        } else {
+            // Remove "ALL" from the actual projects list
+            selected = selected.filter(p => p !== 'ALL');
+            
+            if (selected.length === 0) {
+                selected = ['THC', 'TEC', 'TP', 'TWCP', 'TPO'];
+            }
+        }
+        
+        let searchParams = new URLSearchParams(window.location.search);
+        searchParams.delete('projects');
+        selected.forEach(project => searchParams.append('projects', project));
+        window.location.href = '?' + searchParams.toString();
+    }
+    </script>
+</body>
+</html> 
