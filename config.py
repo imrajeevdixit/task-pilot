@@ -2,8 +2,8 @@ import secrets
 secret_key = secrets.token_hex(16)
 
 # JIRA API Configuration
-JIRA_SERVER = "https://truworth.atlassian.net"
-JIRA_EMAIL = "rajeev.dixit@truworthwellness.com"
+JIRA_SERVER = ""
+JIRA_EMAIL = ""
 JIRA_API_TOKEN = ""
 
 # Flask Configuration
