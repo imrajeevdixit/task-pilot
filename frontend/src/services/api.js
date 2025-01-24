@@ -35,4 +35,34 @@ export const searchAssignees = async (searchTerm = '', projects = '') => {
     console.error('API Error:', error);
     throw error;
   }
+};
+
+export const createTicket = async (ticketData) => {
+  try {
+    const response = await axios.post(`${API_BASE_URL}/api/tickets`, ticketData, {
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
+    });
+    return response.data;
+  } catch (error) {
+    console.error('API Error:', error);
+    throw error;
+  }
+};
+
+export const createBulkTickets = async (tickets) => {
+  try {
+    const response = await axios.post(`${API_BASE_URL}/api/tickets/bulk`, { tickets }, {
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
+    });
+    return response.data;
+  } catch (error) {
+    console.error('API Error:', error);
+    throw error;
+  }
 }; 

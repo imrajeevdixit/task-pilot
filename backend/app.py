@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app, resources={
     r"/*": {
         "origins": "http://localhost:3000",  # Allow all origins in development
-        "methods": ["GET", "OPTIONS"],
+        "methods": ["GET", "POST", "OPTIONS"],  # Added POST
         "allow_headers": ["Content-Type", "Accept", "Authorization", "Origin"]
     }
 })
@@ -45,6 +45,11 @@ def calculate_idle_time(start_date, logged_time):
         return total_available_hours - float(logged_time or 0)
     except (ValueError, TypeError):
         return 0
+
+def calculate_efficiency(logged_time, estimated_time):
+    if not estimated_time:
+        return 0
+    return (logged_time / estimated_time) * 100
 
 @app.route('/api/dashboard', methods=['GET'])
 @swag_from({
@@ -140,14 +145,22 @@ def get_dashboard_data():
             
             if assignee not in engineers_data:
                 engineers_data[assignee] = {
-                    'total_estimate': 0, 'total_logged': 0,
-                    'idle_time': 0, 'current_work': 0, 'projects': {}
+                    'total_estimate': 0,
+                    'total_logged': 0,
+                    'idle_time': 0,
+                    'current_work': 0,
+                    'projects': {},
+                    'efficiency': 0  # Added efficiency field
                 }
             
             if project not in engineers_data[assignee]['projects']:
                 engineers_data[assignee]['projects'][project] = {
-                    'total_estimate': 0, 'total_logged': 0,
-                    'idle_time': 0, 'current_work': 0
+                    'total_estimate': 0,
+                    'total_logged': 0,
+                    'idle_time': 0,
+                    'current_work': 0,
+                    'bandwidth': 0,
+                    'efficiency': 0  # Added efficiency field
                 }
             
             # Get time metrics
@@ -167,15 +180,35 @@ def get_dashboard_data():
                 if issue.fields.status.name not in ['Done', 'Closed']:
                     scope['current_work'] += original_estimate
         
-        # Calculate bandwidth
-        for engineer_data in engineers_data.values():
-            engineer_data['bandwidth'] = (engineer_data['current_work'] / (8 * 5)) * 100
-            for project_data in engineer_data['projects'].values():
-                project_data['bandwidth'] = (project_data['current_work'] / (8 * 5)) * 100
+        # Calculate derived metrics
+        for engineer in engineers_data:
+            data = engineers_data[engineer]
             
-        return jsonify({"engineers_data": engineers_data}), 200
+            # Calculate overall engineer efficiency
+            data['efficiency'] = calculate_efficiency(
+                data['total_logged'],
+                data['total_estimate']
+            )
+            
+            # Calculate bandwidth
+            data['bandwidth'] = (data['current_work'] / (8 * 5)) * 100
+            
+            # Calculate per-project metrics
+            for project in data['projects']:
+                project_data = data['projects'][project]
+                
+                # Calculate project efficiency
+                project_data['efficiency'] = calculate_efficiency(
+                    project_data['total_logged'],
+                    project_data['total_estimate']
+                )
+                
+                # Calculate project bandwidth
+                project_data['bandwidth'] = (project_data['current_work'] / (8 * 5)) * 100
+
+        return jsonify({'engineers_data': engineers_data}), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/assignees', methods=['GET'])
 @swag_from({
@@ -273,6 +306,263 @@ def get_assignees():
         assignee_list.sort(key=lambda x: x['displayName'])
         
         return jsonify({'assignees': assignee_list})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/tickets', methods=['POST'])
+@swag_from({
+    'tags': ['Tickets'],
+    'summary': 'Create a new JIRA ticket',
+    'parameters': [
+        {
+            'name': 'body',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'object',
+                'required': ['project', 'issuetype', 'summary', 'description'],
+                'properties': {
+                    'project': {
+                        'type': 'string',
+                        'description': 'Project key (e.g., THC, TEC)'
+                    },
+                    'issuetype': {
+                        'type': 'string',
+                        'description': 'Issue type (e.g., Task, Bug, Story)'
+                    },
+                    'summary': {
+                        'type': 'string',
+                        'description': 'Ticket summary/title'
+                    },
+                    'description': {
+                        'type': 'string',
+                        'description': 'Detailed description'
+                    },
+                    'assignee': {
+                        'type': 'string',
+                        'description': 'Assignee account ID'
+                    },
+                    'status': {
+                        'type': 'string',
+                        'description': 'Initial status (if different from default)'
+                    }
+                }
+            }
+        }
+    ],
+    'responses': {
+        201: {
+            'description': 'Ticket created successfully',
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'key': {'type': 'string'},
+                    'self': {'type': 'string'},
+                    'message': {'type': 'string'}
+                }
+            }
+        },
+        400: {
+            'description': 'Invalid request parameters'
+        },
+        500: {
+            'description': 'Internal server error'
+        }
+    }
+})
+def create_ticket():
+    try:
+        jira = connect_jira()
+        data = request.get_json()
+
+        # Validate required fields
+        required_fields = ['project', 'issuetype', 'summary', 'description']
+        if not all(field in data for field in required_fields):
+            return jsonify({
+                'error': 'Missing required fields',
+                'required': required_fields
+            }), 400
+
+        # Prepare issue fields
+        issue_dict = {
+            'project': {'key': data['project']},
+            'summary': data['summary'],
+            'description': data['description'],
+            'issuetype': {'name': data['issuetype']},
+        }
+
+        # Add optional assignee if provided
+        if 'assignee' in data:
+            issue_dict['assignee'] = {'id': data['assignee']}
+
+        # Create the issue
+        new_issue = jira.create_issue(fields=issue_dict)
+
+        # Update status if provided and different from default
+        if 'status' in data:
+            transitions = jira.transitions(new_issue)
+            for t in transitions:
+                if t['name'].lower() == data['status'].lower():
+                    jira.transition_issue(new_issue, t['id'])
+                    break
+
+        return jsonify({
+            'key': new_issue.key,
+            'self': new_issue.self,
+            'message': 'Ticket created successfully'
+        }), 201
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/tickets/bulk', methods=['POST'])
+@swag_from({
+    'tags': ['Tickets'],
+    'summary': 'Create multiple JIRA tickets in bulk',
+    'parameters': [
+        {
+            'name': 'body',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'object',
+                'required': ['tickets'],
+                'properties': {
+                    'tickets': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'required': ['project', 'issuetype', 'summary', 'description'],
+                            'properties': {
+                                'project': {
+                                    'type': 'string',
+                                    'description': 'Project key (e.g., THC, TEC)'
+                                },
+                                'issuetype': {
+                                    'type': 'string',
+                                    'description': 'Issue type (e.g., Task, Bug, Story)'
+                                },
+                                'summary': {
+                                    'type': 'string',
+                                    'description': 'Ticket summary/title'
+                                },
+                                'description': {
+                                    'type': 'string',
+                                    'description': 'Detailed description'
+                                },
+                                'assignee': {
+                                    'type': 'string',
+                                    'description': 'Assignee account ID'
+                                },
+                                'status': {
+                                    'type': 'string',
+                                    'description': 'Initial status (if different from default)'
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ],
+    'responses': {
+        201: {
+            'description': 'Tickets created successfully',
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'success': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'key': {'type': 'string'},
+                                'self': {'type': 'string'}
+                            }
+                        }
+                    },
+                    'failed': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'ticket': {'type': 'object'},
+                                'error': {'type': 'string'}
+                            }
+                        }
+                    },
+                    'message': {'type': 'string'}
+                }
+            }
+        },
+        400: {
+            'description': 'Invalid request parameters'
+        },
+        500: {
+            'description': 'Internal server error'
+        }
+    }
+})
+def create_bulk_tickets():
+    try:
+        jira = connect_jira()
+        data = request.get_json()
+
+        if 'tickets' not in data or not isinstance(data['tickets'], list):
+            return jsonify({
+                'error': 'Request must include a "tickets" array'
+            }), 400
+
+        required_fields = ['project', 'issuetype', 'summary', 'description']
+        success_tickets = []
+        failed_tickets = []
+
+        for ticket in data['tickets']:
+            try:
+                # Validate required fields
+                if not all(field in ticket for field in required_fields):
+                    raise ValueError(f"Missing required fields: {[f for f in required_fields if f not in ticket]}")
+
+                # Prepare issue fields
+                issue_dict = {
+                    'project': {'key': ticket['project']},
+                    'summary': ticket['summary'],
+                    'description': ticket['description'],
+                    'issuetype': {'name': ticket['issuetype']},
+                }
+
+                # Add optional assignee if provided
+                if 'assignee' in ticket:
+                    issue_dict['assignee'] = {'id': ticket['assignee']}
+
+                # Create the issue
+                new_issue = jira.create_issue(fields=issue_dict)
+
+                # Update status if provided and different from default
+                if 'status' in ticket:
+                    transitions = jira.transitions(new_issue)
+                    for t in transitions:
+                        if t['name'].lower() == ticket['status'].lower():
+                            jira.transition_issue(new_issue, t['id'])
+                            break
+
+                success_tickets.append({
+                    'key': new_issue.key,
+                    'self': new_issue.self
+                })
+
+            except Exception as e:
+                failed_tickets.append({
+                    'ticket': ticket,
+                    'error': str(e)
+                })
+
+        return jsonify({
+            'success': success_tickets,
+            'failed': failed_tickets,
+            'message': f'Successfully created {len(success_tickets)} tickets, {len(failed_tickets)} failed'
+        }), 201
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

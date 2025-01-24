@@ -4,13 +4,15 @@ import {
   Box, Container, Grid, Paper, Typography, FormControl, 
   InputLabel, Select, MenuItem, OutlinedInput, Chip,
   CircularProgress, Alert, Card, CardContent,
-  Checkbox, Button, ListItemText
+  Checkbox, Button, ListItemText, List, ListItem, ListItemButton,
+  Divider
 } from '@mui/material';
 import { getDashboardData } from '../services/api';
 import MetricsCard from './MetricsCard';
 import ProjectMetrics from './ProjectMetrics';
 import EngineerMetrics from './EngineerMetrics';
 import AssigneeSelect from './AssigneeSelect';
+import ExpandableBarGraph from './ExpandableBarGraph';
 
 const timeRanges = [
   { value: '7d', label: 'Last 7 Days' },
@@ -28,6 +30,7 @@ export default function Dashboard() {
   const [tempSelectedProjects, setTempSelectedProjects] = useState(ALL_PROJECTS);
   const [selectedAssignees, setSelectedAssignees] = useState([]);
   const [isProjectsOpen, setIsProjectsOpen] = useState(false);
+  const [selectedEngineer, setSelectedEngineer] = useState(null);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard', timeRange, selectedProjects, selectedAssignees],
@@ -178,24 +181,73 @@ export default function Dashboard() {
 
       <Grid container spacing={3}>
         <Grid item xs={12}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" gutterBottom>Overall Team Metrics</Typography>
-              <EngineerMetrics data={data?.engineers_data || {}} />
-            </CardContent>
-          </Card>
+          <ExpandableBarGraph data={data?.engineers_data || {}} />
         </Grid>
-        {Object.entries(data?.engineers_data || {}).map(([engineer, metrics]) => (
-          <Grid item xs={12} md={6} key={engineer}>
-            <Paper sx={{ p: 3, height: '100%' }}>
-              <Typography variant="h6" gutterBottom>
-                {engineer}
-              </Typography>
-              <MetricsCard metrics={metrics} />
-              <ProjectMetrics projects={metrics.projects} />
-            </Paper>
-          </Grid>
-        ))}
+
+        {/* Split View Container */}
+        <Grid item xs={12}>
+          <Paper sx={{ p: 0, display: 'flex', minHeight: 600 }}>
+            {/* Left Section - Engineers List */}
+            <Box sx={{ width: 300, borderRight: 1, borderColor: 'divider' }}>
+              <List sx={{ p: 0 }}>
+                <ListItem sx={{ bgcolor: 'grey.100' }}>
+                  <Typography variant="h6">Team Members</Typography>
+                </ListItem>
+                <Divider />
+                {Object.entries(data?.engineers_data || {}).map(([engineer, metrics]) => (
+                  <ListItem key={engineer} disablePadding>
+                    <ListItemButton 
+                      selected={selectedEngineer === engineer}
+                      onClick={() => setSelectedEngineer(engineer)}
+                      sx={{
+                        '&.Mui-selected': {
+                          bgcolor: 'primary.light',
+                          '&:hover': {
+                            bgcolor: 'primary.light',
+                          },
+                        },
+                      }}
+                    >
+                      <ListItemText 
+                        primary={engineer}
+                        secondary={`${Math.round(metrics.efficiency)}% Efficient`}
+                      />
+                    </ListItemButton>
+                  </ListItem>
+                ))}
+              </List>
+            </Box>
+
+            {/* Right Section - Metrics and Insights */}
+            <Box sx={{ flexGrow: 1, p: 3 }}>
+              {selectedEngineer ? (
+                <>
+                  <Typography variant="h5" gutterBottom>
+                    {selectedEngineer}'s Performance Insights
+                  </Typography>
+                  <MetricsCard 
+                    metrics={data?.engineers_data[selectedEngineer]} 
+                    expanded={true}
+                  />
+                </>
+              ) : (
+                <Box 
+                  sx={{ 
+                    height: '100%', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    color: 'text.secondary'
+                  }}
+                >
+                  <Typography variant="h6">
+                    Select an engineer to view their insights
+                  </Typography>
+                </Box>
+              )}
+            </Box>
+          </Paper>
+        </Grid>
       </Grid>
     </Container>
   );
