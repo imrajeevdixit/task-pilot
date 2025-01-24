@@ -1,30 +1,42 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory, redirect
 from jira import JIRA
 from datetime import datetime, timedelta
 import pandas as pd
 from config import *
 from flasgger import Swagger, swag_from
+from flask_cors import CORS
 
 app = Flask(__name__)
-app.config.from_object('config')
 
-# Swagger Config
-swagger_config = {
-    "headers": [],
-    "specs": [
-        {
-            "endpoint": 'apispec',
-            "route": '/apispec.json',
-            "rule_filter": lambda rule: True,
-            "model_filter": lambda tag: True,
-        }
-    ],
-    "static_url_path": "/flasgger_static",
-    "swagger_ui": True,
-    "specs_route": "/swagger/"
+# Add root route to redirect to Swagger docs
+@app.route('/')
+def index():
+    return redirect('/swagger/')
+
+# Basic Swagger config
+app.config['SWAGGER'] = {
+    'title': 'Engineering Productivity API',
+    'version': '1.0.0',
+    'description': 'API for JIRA productivity metrics',
+    'specs_route': '/swagger/',
+    'uiversion': 3
 }
 
-swagger = Swagger(app, config=swagger_config)
+# Update CORS to only allow necessary routes
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["http://localhost:3000"],
+        "methods": ["GET", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
+swagger = Swagger(app)
+
+# Add route to serve swagger-ui files
+@app.route('/docs/<path:path>')
+def send_swagger_ui(path):
+    return send_from_directory('static', path)
 
 def connect_jira():
     return JIRA(
@@ -223,16 +235,5 @@ def get_dashboard_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/')
-def dashboard():
-    """Web dashboard view"""
-    time_range = request.args.get('time_range', '3m')
-    selected_projects = request.args.getlist('projects') or ['THC', 'TEC', 'TP', 'TWCP', 'TPO']
-    engineers_data = get_dashboard_data()[0].json['engineers_data']
-    return render_template('dashboard.html', 
-                         engineers_data=engineers_data, 
-                         current_range=time_range,
-                         selected_projects=selected_projects)
-
 if __name__ == '__main__':
-    app.run(debug=True) 
+    app.run(host='localhost', port=5000, debug=True) 
