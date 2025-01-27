@@ -1,18 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { 
   Box, Container, Grid, Paper, Typography, FormControl, 
   InputLabel, Select, MenuItem, OutlinedInput, Chip,
-  CircularProgress, Alert, Card, CardContent,
-  Checkbox, Button, ListItemText, List, ListItem, ListItemButton,
-  Divider
+  CircularProgress, Alert, Button, ListItemText, List, ListItem, ListItemButton,
+  Checkbox
 } from '@mui/material';
 import { getDashboardData } from '../services/api';
 import MetricsCard from './MetricsCard';
-import ProjectMetrics from './ProjectMetrics';
-import EngineerMetrics from './EngineerMetrics';
 import AssigneeSelect from './AssigneeSelect';
 import ExpandableBarGraph from './ExpandableBarGraph';
+import TicketLifecycleMetrics from './TicketLifecycleMetrics';
 
 const timeRanges = [
   { value: '7d', label: 'Last 7 Days' },
@@ -39,7 +37,15 @@ export default function Dashboard() {
       selectedProjects.join(','),
       selectedAssignees.map(a => a.accountId).join(',')
     ),
-    enabled: true, // Query will not auto-run
+    enabled: true,
+  });
+
+  // Add debug logging
+  console.log('Dashboard Data:', {
+    hasData: !!data,
+    lifecycleTrends: data?.lifecycle_trends,
+    tickets: data?.tickets?.length,
+    metrics: data?.performance_metrics
   });
 
   const handleProjectChange = (event) => {
@@ -64,6 +70,12 @@ export default function Dashboard() {
   const handleProjectsClose = () => {
     setTempSelectedProjects(selectedProjects); // Reset to previous selection
     setIsProjectsOpen(false);
+  };
+
+  const getVarianceText = (variance) => {
+    if (variance > 0) return `${Math.abs(variance)}% ahead`;
+    if (variance < 0) return `${Math.abs(variance)}% behind`;
+    return 'On schedule';
   };
 
   if (isLoading) return (
@@ -180,20 +192,35 @@ export default function Dashboard() {
       </Box>
 
       <Grid container spacing={3}>
+        {/* Team Performance Overview */}
         <Grid item xs={12}>
-          <ExpandableBarGraph data={data?.engineers_data || {}} />
+          <ExpandableBarGraph 
+            data={data?.engineers_data || {}} 
+            dailyMetrics={data?.daily_metrics || {}}
+          />
         </Grid>
 
-        {/* Split View Container */}
+        {/* Split View Section */}
         <Grid item xs={12}>
-          <Paper sx={{ p: 0, display: 'flex', minHeight: 600 }}>
-            {/* Left Section - Engineers List */}
-            <Box sx={{ width: 300, borderRight: 1, borderColor: 'divider' }}>
+          <Paper sx={{ p: 0, display: 'flex', height: 800 }}>
+            {/* Left Section - Engineer List */}
+            <Box sx={{ 
+              width: 300, 
+              borderRight: 1, 
+              borderColor: 'divider',
+              overflow: 'auto'
+            }}>
+              <Box sx={{ 
+                bgcolor: 'grey.100', 
+                borderBottom: 1, 
+                borderColor: 'divider',
+                px: 2,
+                py: 1.5
+              }}>
+                <Typography variant="h6">Team Members</Typography>
+              </Box>
+
               <List sx={{ p: 0 }}>
-                <ListItem sx={{ bgcolor: 'grey.100' }}>
-                  <Typography variant="h6">Team Members</Typography>
-                </ListItem>
-                <Divider />
                 {Object.entries(data?.engineers_data || {}).map(([engineer, metrics]) => (
                   <ListItem key={engineer} disablePadding>
                     <ListItemButton 
@@ -210,7 +237,7 @@ export default function Dashboard() {
                     >
                       <ListItemText 
                         primary={engineer}
-                        secondary={`${Math.round(metrics.efficiency)}% Efficient`}
+                        secondary={getVarianceText(metrics.time_variance)}
                       />
                     </ListItemButton>
                   </ListItem>
@@ -219,27 +246,42 @@ export default function Dashboard() {
             </Box>
 
             {/* Right Section - Metrics and Insights */}
-            <Box sx={{ flexGrow: 1, p: 3 }}>
+            <Box sx={{ 
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden'
+            }}>
               {selectedEngineer ? (
                 <>
-                  <Typography variant="h5" gutterBottom>
+                  <Typography variant="h5" sx={{ p: 2, pb: 1 }}>
                     {selectedEngineer}'s Performance Insights
                   </Typography>
-                  <MetricsCard 
-                    metrics={data?.engineers_data[selectedEngineer]} 
-                    expanded={true}
-                  />
+                  <Box sx={{ flex: 1, overflow: 'auto', p: 2, pt: 1 }}>
+                    <MetricsCard 
+                      metrics={data?.engineers_data[selectedEngineer]} 
+                      expanded={true}
+                    />
+                    <Box sx={{ mt: 2 }}>
+                      <TicketLifecycleMetrics 
+                        tickets={data?.tickets || []}
+                        performanceMetrics={data?.performance_metrics || {}}
+                        lifecycleTrends={data?.lifecycle_trends}
+                        selectedEngineer={selectedEngineer}
+                        timeRange={timeRange}
+                        engineersData={data?.engineers_data || {}}
+                      />
+                    </Box>
+                  </Box>
                 </>
               ) : (
-                <Box 
-                  sx={{ 
-                    height: '100%', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center',
-                    color: 'text.secondary'
-                  }}
-                >
+                <Box sx={{ 
+                  height: '100%', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center',
+                  color: 'text.secondary'
+                }}>
                   <Typography variant="h6">
                     Select an engineer to view their insights
                   </Typography>

@@ -1,100 +1,43 @@
-import { useState } from 'react';
+import React from 'react';
 import {
   Card,
   CardContent,
   Typography,
-  Grid,
   Box,
-  IconButton,
-  Collapse,
-  Divider,
   LinearProgress,
-  Tooltip
+  Tooltip,
+  Collapse,
+  IconButton
 } from '@mui/material';
-import {
-  ExpandMore as ExpandMoreIcon,
-  AccessTime as AccessTimeIcon,
-  Speed as SpeedIcon,
-  Timeline as TimelineIcon,
-  Assignment as AssignmentIcon
-} from '@mui/icons-material';
-import ProjectMetrics from './ProjectMetrics';
+import { ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
 
 export default function MetricsCard({ metrics, expanded = false }) {
-  const [isExpanded, setIsExpanded] = useState(expanded);
-
-  const handleExpandClick = () => {
-    setIsExpanded(!isExpanded);
-  };
+  const [isExpanded, setIsExpanded] = React.useState(expanded);
 
   const formatHours = (hours) => {
-    const days = Math.floor(hours / 8);
-    const remainingHours = Math.round(hours % 8);
-    if (days === 0) return `${remainingHours}h`;
-    return `${days}d ${remainingHours}h`;
+    if (!hours) return '0h';
+    return `${Math.round(hours)}h`;
   };
 
-  const calculateEfficiency = (logged, estimated) => {
-    if (!estimated) return 0;
-    return (logged / estimated) * 100;
+  const getVarianceColor = (variance) => {
+    if (variance > 10) return 'error';
+    if (variance < -10) return 'success';
+    return 'warning';
   };
 
-  const getEfficiencyColor = (efficiency) => {
-    if (efficiency <= 70) return 'error';
-    if (efficiency <= 90) return 'warning';
-    return 'success';
+  const getVarianceText = (variance) => {
+    if (variance > 0) return `${Math.abs(variance)}% over capacity`;
+    if (variance < 0) return `${Math.abs(variance)}% under capacity`;
+    return 'At capacity';
   };
 
   return (
     <Card>
       <CardContent>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={6} md={3}>
-              <Tooltip title="Total Estimated Time">
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <AccessTimeIcon color="primary" />
-                  <Typography variant="body2">
-                    Estimated: {formatHours(metrics.total_estimate)}
-                  </Typography>
-                </Box>
-              </Tooltip>
-            </Grid>
-            <Grid item xs={12} sm={6} md={3}>
-              <Tooltip title="Total Time Logged">
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <TimelineIcon color="secondary" />
-                  <Typography variant="body2">
-                    Logged: {formatHours(metrics.total_logged)}
-                  </Typography>
-                </Box>
-              </Tooltip>
-            </Grid>
-            <Grid item xs={12} sm={6} md={3}>
-              <Tooltip title="Current Work in Progress">
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <AssignmentIcon color="info" />
-                  <Typography variant="body2">
-                    In Progress: {formatHours(metrics.current_work)}
-                  </Typography>
-                </Box>
-              </Tooltip>
-            </Grid>
-            <Grid item xs={12} sm={6} md={3}>
-              <Tooltip title="Current Bandwidth">
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <SpeedIcon color="warning" />
-                  <Typography variant="body2">
-                    Bandwidth: {Math.round(metrics.bandwidth)}%
-                  </Typography>
-                </Box>
-              </Tooltip>
-            </Grid>
-          </Grid>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h6">Performance Metrics</Typography>
           <IconButton
-            onClick={handleExpandClick}
-            aria-expanded={isExpanded}
-            aria-label="show more"
+            onClick={() => setIsExpanded(!isExpanded)}
             sx={{
               transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
               transition: 'transform 0.3s'
@@ -104,69 +47,82 @@ export default function MetricsCard({ metrics, expanded = false }) {
           </IconButton>
         </Box>
 
-        <Collapse in={isExpanded} timeout="auto" unmountOnExit>
-          <Divider sx={{ my: 2 }} />
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Detailed Insights
+        <Box sx={{ mb: 2 }}>
+          <Typography variant="caption" color="text.secondary">
+            Schedule Variance
+          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <LinearProgress
+              variant="determinate"
+              value={Math.abs(metrics?.time_variance || 0)}
+              color={getVarianceColor(metrics?.time_variance)}
+              sx={{ height: 8, borderRadius: 4, flexGrow: 1 }}
+            />
+            <Typography variant="caption" sx={{ minWidth: 45 }}>
+              {getVarianceText(metrics?.time_variance)}
             </Typography>
-            
-            {/* Efficiency Rate */}
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="subtitle2" gutterBottom>
-                Work Efficiency Rate
-              </Typography>
-              <LinearProgress
-                variant="determinate"
-                value={calculateEfficiency(metrics.total_logged, metrics.total_estimate)}
-                color={getEfficiencyColor(calculateEfficiency(metrics.total_logged, metrics.total_estimate))}
-                sx={{ height: 10, borderRadius: 5 }}
-              />
-              <Typography variant="caption" color="text.secondary">
-                {Math.round(calculateEfficiency(metrics.total_logged, metrics.total_estimate))}% of estimated time utilized
-              </Typography>
-            </Box>
+          </Box>
+        </Box>
 
-            {/* Idle Time Analysis */}
-            <Box sx={{ mb: 2 }}>
+        <Collapse in={isExpanded}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {/* Time Metrics */}
+            <Box>
               <Typography variant="subtitle2" gutterBottom>
-                Idle Time Analysis
+                Time Metrics
               </Typography>
-              <Typography variant="body2">
-                Total Idle Time: {formatHours(metrics.idle_time)}
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Time between tasks or waiting for assignments
-              </Typography>
-            </Box>
-
-            {/* Workload Distribution */}
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="subtitle2" gutterBottom>
-                Current Workload
-              </Typography>
-              <LinearProgress
-                variant="determinate"
-                value={Math.min(metrics.bandwidth, 100)}
-                color={metrics.bandwidth > 100 ? 'error' : 'primary'}
-                sx={{ height: 10, borderRadius: 5 }}
-              />
-              <Typography variant="caption" color="text.secondary">
-                {metrics.bandwidth > 100 
-                  ? `Overloaded by ${Math.round(metrics.bandwidth - 100)}%`
-                  : `${Math.round(metrics.bandwidth)}% of capacity utilized`}
-              </Typography>
-            </Box>
-
-            {/* Project Distribution Section */}
-            {metrics.projects && (
-              <Box sx={{ mt: 3 }}>
-                <Typography variant="h6" gutterBottom>
-                  Project-wise Metrics
-                </Typography>
-                <ProjectMetrics projects={metrics.projects} />
+              <Box sx={{ display: 'flex', gap: 2 }}>
+                <Tooltip title="Average time to start working on tickets">
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">
+                      Avg Time to Start
+                    </Typography>
+                    <Typography variant="body2">
+                      {formatHours(metrics?.avg_time_to_start)}
+                    </Typography>
+                  </Box>
+                </Tooltip>
+                <Tooltip title="Average time to complete tickets">
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">
+                      Avg Time to Complete
+                    </Typography>
+                    <Typography variant="body2">
+                      {formatHours(metrics?.avg_time_to_complete)}
+                    </Typography>
+                  </Box>
+                </Tooltip>
               </Box>
-            )}
+            </Box>
+
+            {/* Workload Metrics */}
+            <Box>
+              <Typography variant="subtitle2" gutterBottom>
+                Workload Metrics
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 2 }}>
+                <Tooltip title="Current tasks in progress">
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">
+                      Active Tasks
+                    </Typography>
+                    <Typography variant="body2">
+                      {metrics?.active_tasks || 0}
+                    </Typography>
+                  </Box>
+                </Tooltip>
+                <Tooltip title="Tasks completed in the period">
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">
+                      Completed Tasks
+                    </Typography>
+                    <Typography variant="body2">
+                      {metrics?.completed_tasks || 0}
+                    </Typography>
+                  </Box>
+                </Tooltip>
+              </Box>
+            </Box>
           </Box>
         </Collapse>
       </CardContent>

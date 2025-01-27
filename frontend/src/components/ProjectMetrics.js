@@ -17,10 +17,16 @@ export default function ProjectMetrics({ projects }) {
     return `${days}d ${remainingHours}h`;
   };
 
-  const getEfficiencyColor = (efficiency) => {
-    if (efficiency <= 70) return 'error';
-    if (efficiency <= 90) return 'warning';
+  const getVarianceColor = (variance) => {
+    if (variance <= -20) return 'error';
+    if (variance < 0) return 'warning';
     return 'success';
+  };
+
+  const getVarianceText = (variance) => {
+    if (variance > 0) return `${Math.abs(variance)}% ahead of schedule`;
+    if (variance < 0) return `${Math.abs(variance)}% behind schedule`;
+    return 'On schedule';
   };
 
   return (
@@ -104,20 +110,20 @@ export default function ProjectMetrics({ projects }) {
             </Grid>
           </Grid>
 
-          {/* Project Efficiency */}
+          {/* Time Variance (replacing Project Efficiency) */}
           <Box sx={{ mb: 2 }}>
             <Typography variant="caption" color="text.secondary">
-              Project Efficiency
+              Schedule Variance
             </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <LinearProgress
                 variant="determinate"
-                value={data.efficiency}
-                color={getEfficiencyColor(data.efficiency)}
+                value={Math.abs(data.time_variance)}
+                color={getVarianceColor(data.time_variance)}
                 sx={{ height: 8, borderRadius: 4, flexGrow: 1 }}
               />
               <Typography variant="caption" sx={{ minWidth: 45 }}>
-                {Math.round(data.efficiency)}%
+                {getVarianceText(data.time_variance)}
               </Typography>
             </Box>
           </Box>

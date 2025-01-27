@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request, redirect
 from jira import JIRA
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 from .config import *
 from flasgger import Swagger, swag_from
@@ -40,194 +40,339 @@ def calculate_idle_time(start_date, logged_time):
     try:
         start = datetime.strptime(start_date, '%Y-%m-%d')
         today = datetime.now()
+        
+        # Calculate working days
         working_days = len(pd.bdate_range(start, today))
+        
+        # If start and today are the same, set working_days to 1
+        if working_days == 0 and start.date() == today.date():
+            working_days = 1
+        
         total_available_hours = working_days * 8
-        return total_available_hours - float(logged_time or 0)
+        idle_time = total_available_hours - float(logged_time or 0)
+        
+        # Ensure idle time is not negative
+        return max(idle_time, 0)
     except (ValueError, TypeError):
         return 0
 
-def calculate_efficiency(logged_time, estimated_time):
+def calculate_time_variance(logged_time, estimated_time):
     if not estimated_time:
         return 0
-    return (logged_time / estimated_time) * 100
+    # Calculate variance as percentage difference from estimate
+    # Positive: Ahead of schedule (completed early)
+    # Negative: Behind schedule (took longer)
+    variance = ((estimated_time - logged_time) / estimated_time) * 100
+    return round(variance, 2)
 
-@app.route('/api/dashboard', methods=['GET'])
-@swag_from({
-    'tags': ['Dashboard'],
-    'summary': 'Get engineering productivity metrics across multiple projects',
-    'parameters': [
-        {
-            'name': 'time_range',
-            'in': 'query',
-            'type': 'string',
-            'enum': ['7d', '1m', '3m', '6m', 'all'],
-            'default': '3m',
-            'description': 'Time range for metrics'
-        },
-        {
-            'name': 'projects',
-            'in': 'query',
-            'type': 'string',
-            'default': 'THC,TEC,TP,TWCP,TPO',
-            'description': 'Comma-separated list of projects to include in metrics'
-        },
-        {
-            'name': 'assignees',
-            'in': 'query',
-            'type': 'string',
-            'description': 'Comma-separated list of assignees to include in metrics'
-        }
-    ],
-    'responses': {
-        200: {
-            'description': 'Success',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'engineers_data': {'type': 'object'}
-                }
-            }
-        },
-        500: {
-            'description': 'Internal Server Error'
-        }
+def calculate_ticket_durations(changelog, created_date):
+    """Calculate time spent in each status"""
+    durations = {
+        'time_to_start': 0,    # Created -> In Progress
+        'time_to_complete': 0  # In Progress -> Done
     }
-})
-def get_dashboard_data():
+    
     try:
-        jira = connect_jira()
-        time_range = request.args.get('time_range', '3m')
-        projects = request.args.getlist('projects')
-        assignees = request.args.get('assignees', '').split(',')
+        # Parse created date from string to datetime
+        created_date = datetime.strptime(created_date, '%Y-%m-%dT%H:%M:%S.%f%z')
         
-        if not projects:
-            projects = ['THC', 'TEC', 'TP', 'TWCP', 'TPO']
-        elif len(projects) == 1 and ',' in projects[0]:
-            projects = [p.strip() for p in projects[0].split(',')]
+        status_changes = []
+        for history in changelog.histories:
+            for item in history.items:
+                if item.field == 'status':
+                    status_changes.append({
+                        'date': datetime.strptime(history.created, '%Y-%m-%dT%H:%M:%S.%f%z'),
+                        'from_status': item.fromString,
+                        'to_status': item.toString
+                    })
         
-        # Format projects for JQL
-        projects_str = ', '.join([f'"{p}"' for p in projects])
+        # Sort changes by date
+        status_changes.sort(key=lambda x: x['date'])
         
-        # Add assignee filter if provided
-        assignee_clause = ''
-        if assignees and assignees[0]:  # Check if assignees list is not empty
-            assignee_str = ', '.join([f'"{a}"' for a in assignees])
-            assignee_clause = f' AND assignee in ({assignee_str})'
+        started_date = None
+        completed_date = None
         
-        # Calculate date range
-        date_clause = ''
-        if time_range != 'all':
-            today = datetime.now()
-            days = {'7d': 7, '1m': 30, '3m': 90, '6m': 180}
-            start_date = today - timedelta(days=days[time_range])
-            date_clause = f' AND updated >= "{start_date.strftime("%Y-%m-%d")}"'
+        for change in status_changes:
+            if change['to_status'] == 'In Progress':
+                started_date = change['date']
+            elif change['to_status'] in ['Done', 'Closed']:
+                completed_date = change['date']
         
-        # Query with pagination
-        start_at = 0
-        max_results = 500
-        all_issues = []
-        
-        while True:
-            jql_query = f'project in ({projects_str}){assignee_clause}{date_clause} AND assignee is not EMPTY ORDER BY created DESC'
+        # Calculate durations in hours
+        if started_date:
+            durations['time_to_start'] = (started_date - created_date).total_seconds() / 3600
+        if completed_date and started_date:
+            durations['time_to_complete'] = (completed_date - started_date).total_seconds() / 3600
             
-            issues = jira.search_issues(jql_query, startAt=start_at, maxResults=max_results, expand='changelog')
-            if not issues or len(issues) < max_results:
-                all_issues.extend(issues)
-                break
-            all_issues.extend(issues)
-            start_at += max_results
+    except (ValueError, TypeError, AttributeError):
+        pass  # Return default durations if any error occurs
+        
+    return durations
 
-        # Process issues
-        engineers_data = {}
-        for issue in all_issues:
-            assignee = issue.fields.assignee.displayName
-            project = issue.fields.project.key
-            
-            if assignee not in engineers_data:
-                engineers_data[assignee] = {
-                    'total_estimate': 0,
-                    'total_logged': 0,
-                    'idle_time': 0,
-                    'current_work': 0,
-                    'projects': {},
-                    'efficiency': 0  # Added efficiency field
-                }
-            
-            if project not in engineers_data[assignee]['projects']:
-                engineers_data[assignee]['projects'][project] = {
-                    'total_estimate': 0,
-                    'total_logged': 0,
-                    'idle_time': 0,
-                    'current_work': 0,
-                    'bandwidth': 0,
-                    'efficiency': 0  # Added efficiency field
-                }
-            
-            # Get time metrics
-            original_estimate = (issue.fields.timeoriginalestimate or 0) / 3600
-            time_spent = (issue.fields.timespent or 0) / 3600
-            
-            try:
-                start_date = str(issue.fields.customfield_10015 or '')
-            except AttributeError:
+def get_daily_metrics(issues, start_date, end_date):
+    """Calculate daily metrics for team performance"""
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    
+    # Initialize metrics structure with both team and per-engineer data
+    daily_metrics = {str(date.date()): {
+        'logged_time': 0,
+        'estimated_time': 0,
+        'cycle_time': 0,
+        'completed_tasks': 0,
+        'active_tasks': 0,
+        'efficiency': 0,
+        'engineers': {}  # Track per-engineer metrics
+    } for date in date_range}
+
+    # Track all engineers we encounter
+    all_engineers = set()
+
+    for issue in issues:
+        assignee = issue.fields.assignee.displayName if issue.fields.assignee else 'Unassigned'
+        all_engineers.add(assignee)
+
+        # Get estimated time
+        try:
+            original_estimate = issue.fields.timeoriginalestimate
+            if original_estimate:
+                original_estimate = original_estimate / 3600  # Convert to hours
+            else:
+                original_estimate = 0
+        except AttributeError:
+            original_estimate = 0
+
+        # Handle worklogs for actual time logged
+        try:
+            worklogs = issue.fields.worklog.worklogs
+            if worklogs:
+                for worklog in worklogs:
+                    work_date = datetime.strptime(worklog.started, '%Y-%m-%dT%H:%M:%S.%f%z').date()
+                    work_date_str = str(work_date)
+                    if work_date_str in daily_metrics:
+                        time_spent = worklog.timeSpentSeconds / 3600 if worklog.timeSpentSeconds else 0
+                        
+                        # Update team metrics
+                        daily_metrics[work_date_str]['logged_time'] += time_spent
+                        if original_estimate > 0 and len(worklogs) > 0:
+                            daily_metrics[work_date_str]['estimated_time'] += original_estimate / len(worklogs)
+                        
+                        # Initialize engineer metrics if needed
+                        if assignee not in daily_metrics[work_date_str]['engineers']:
+                            daily_metrics[work_date_str]['engineers'][assignee] = {
+                                'logged_time': 0,
+                                'estimated_time': 0,
+                                'cycle_time': 0,
+                                'completed_tasks': 0,
+                                'active_tasks': 0,
+                                'efficiency': 0
+                            }
+                        
+                        # Update engineer metrics
+                        eng_metrics = daily_metrics[work_date_str]['engineers'][assignee]
+                        eng_metrics['logged_time'] += time_spent
+                        if original_estimate > 0 and len(worklogs) > 0:
+                            eng_metrics['estimated_time'] += original_estimate / len(worklogs)
+        except (AttributeError, ValueError):
+            continue
+
+        # Calculate cycle time (In Progress to Done)
+        try:
+            if issue.fields.status.name in ['Done', 'Closed'] and issue.fields.resolutiondate:
+                status_changes = []
+                for history in issue.changelog.histories:
+                    for item in history.items:
+                        if item.field == 'status':
+                            status_changes.append({
+                                'date': datetime.strptime(history.created, '%Y-%m-%dT%H:%M:%S.%f%z'),
+                                'from_status': item.fromString,
+                                'to_status': item.toString
+                            })
+
+                # Find In Progress and Done dates
                 start_date = None
-            
-            # Update metrics
-            for scope in [engineers_data[assignee], engineers_data[assignee]['projects'][project]]:
-                scope['total_estimate'] += original_estimate
-                scope['total_logged'] += time_spent
-                scope['idle_time'] += calculate_idle_time(start_date, time_spent)
-                if issue.fields.status.name not in ['Done', 'Closed']:
-                    scope['current_work'] += original_estimate
-        
-        # Calculate derived metrics
-        for engineer in engineers_data:
-            data = engineers_data[engineer]
-            
-            # Calculate overall engineer efficiency
-            data['efficiency'] = calculate_efficiency(
-                data['total_logged'],
-                data['total_estimate']
-            )
-            
-            # Calculate bandwidth
-            data['bandwidth'] = (data['current_work'] / (8 * 5)) * 100
-            
-            # Calculate per-project metrics
-            for project in data['projects']:
-                project_data = data['projects'][project]
-                
-                # Calculate project efficiency
-                project_data['efficiency'] = calculate_efficiency(
-                    project_data['total_logged'],
-                    project_data['total_estimate']
-                )
-                
-                # Calculate project bandwidth
-                project_data['bandwidth'] = (project_data['current_work'] / (8 * 5)) * 100
+                end_date = None
+                for change in sorted(status_changes, key=lambda x: x['date']):
+                    if change['to_status'] == 'In Progress' and not start_date:
+                        start_date = change['date']
+                    elif change['to_status'] in ['Done', 'Closed']:
+                        end_date = change['date']
 
-        return jsonify({'engineers_data': engineers_data}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+                if start_date and end_date:
+                    cycle_time = (end_date - start_date).total_seconds() / 3600
+                    resolution_date_str = str(end_date.date())
+                    if resolution_date_str in daily_metrics:
+                        # Update team metrics
+                        daily_metrics[resolution_date_str]['cycle_time'] += cycle_time
+                        daily_metrics[resolution_date_str]['completed_tasks'] += 1
+                        
+                        # Update engineer metrics
+                        if assignee in daily_metrics[resolution_date_str]['engineers']:
+                            eng_metrics = daily_metrics[resolution_date_str]['engineers'][assignee]
+                            eng_metrics['cycle_time'] += cycle_time
+                            eng_metrics['completed_tasks'] += 1
+
+        except (AttributeError, ValueError):
+            continue
+
+        # Track active tasks
+        if issue.fields.status.name not in ['Done', 'Closed']:
+            for date_str in daily_metrics:
+                # Update team metrics
+                daily_metrics[date_str]['active_tasks'] += 1
+                
+                # Update engineer metrics
+                if assignee in daily_metrics[date_str]['engineers']:
+                    daily_metrics[date_str]['engineers'][assignee]['active_tasks'] += 1
+
+    # Calculate efficiency for team and individual engineers
+    for date_metrics in daily_metrics.values():
+        # Calculate team efficiency
+        date_metrics['efficiency'] = calculate_efficiency(date_metrics)
+        
+        # Calculate efficiency for each engineer
+        for eng_metrics in date_metrics['engineers'].values():
+            eng_metrics['efficiency'] = calculate_efficiency(eng_metrics)
+
+    # Prepare the response structure
+    response = {
+        'team': {date: {k: v for k, v in metrics.items() if k != 'engineers'}
+                for date, metrics in daily_metrics.items()},
+        'engineers': {engineer: {} for engineer in all_engineers}
+    }
+
+    # Populate engineer-specific metrics
+    for date, metrics in daily_metrics.items():
+        for engineer in all_engineers:
+            eng_metrics = metrics['engineers'].get(engineer, {
+                'logged_time': 0,
+                'estimated_time': 0,
+                'cycle_time': 0,
+                'completed_tasks': 0,
+                'active_tasks': 0,
+                'efficiency': 0
+            })
+            response['engineers'][engineer][date] = eng_metrics
+
+    return response
+
+def calculate_efficiency(metrics):
+    """Helper function to calculate efficiency metrics"""
+    try:
+        if metrics['logged_time'] > 0 and metrics['completed_tasks'] > 0:
+            # Time accuracy calculation
+            time_accuracy = 0
+            if metrics['logged_time'] > 0 and metrics['estimated_time'] > 0:
+                time_accuracy = min(
+                    metrics['estimated_time'] / metrics['logged_time'],
+                    1
+                ) * 100
+
+            # Process efficiency calculation
+            process_efficiency = 0
+            if metrics['cycle_time'] > 0 and metrics['logged_time'] > 0:
+                process_efficiency = min(
+                    metrics['logged_time'] / metrics['cycle_time'],
+                    1
+                ) * 100
+
+            # Calculate overall efficiency
+            if time_accuracy > 0 or process_efficiency > 0:
+                return (time_accuracy + process_efficiency) / 2
+    except (ZeroDivisionError, TypeError):
+        pass
+    return 0
+
+def get_lifecycle_trends(issues, start_date, end_date):
+    """Calculate daily lifecycle trends based on work logs"""
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    
+    # Initialize trends structure
+    trends = {str(date.date()): {
+        'completion_hours': 0,
+        'available_hours': 8,
+        'active_tasks': 0,
+        'projects': {},
+        'variance': 0,
+        'work_logs': []  # Add work logs array to track daily work
+    } for date in date_range}
+
+    for issue in issues:
+        try:
+            project_key = issue.fields.project.key
+            assignee = issue.fields.assignee.displayName if issue.fields.assignee else None
+
+            # Process work logs from comments
+            for comment in issue.fields.comment.comments:
+                if any(marker in comment.body.lower() for marker in ['[work:', '[progress:', '[done:']):
+                    work_hours = extract_hours_from_comment(comment.body)
+                    comment_date = datetime.strptime(comment.created, '%Y-%m-%dT%H:%M:%S.%f%z')
+                    date_str = str(comment_date.date())
+                    
+                    if date_str in trends:
+                        # Add work log entry with more details
+                        work_log = {
+                            'ticket_key': issue.key,
+                            'summary': issue.fields.summary,
+                            'hours': work_hours,
+                            'comment': comment.body,
+                            'author': comment.author.displayName,
+                            'project': project_key,
+                            'status': issue.fields.status.name,
+                            'created': comment.created
+                        }
+                        trends[date_str]['work_logs'].append(work_log)
+                        
+                        # Update completion hours
+                        trends[date_str]['completion_hours'] += work_hours
+                        
+                        # Update project-specific data
+                        if project_key not in trends[date_str]['projects']:
+                            trends[date_str]['projects'][project_key] = {
+                                'completion_hours': 0,
+                                'active_tasks': 0
+                            }
+                        trends[date_str]['projects'][project_key]['completion_hours'] += work_hours
+
+            # Track active tasks
+            created_date = datetime.strptime(issue.fields.created, '%Y-%m-%dT%H:%M:%S.%f%z').date()
+            resolved_date = None
+            if issue.fields.resolutiondate:
+                resolved_date = datetime.strptime(issue.fields.resolutiondate, '%Y-%m-%dT%H:%M:%S.%f%z').date()
+
+            for date_str in trends:
+                date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                if created_date <= date and (not resolved_date or date <= resolved_date):
+                    trends[date_str]['active_tasks'] += 1
+                    if project_key in trends[date_str]['projects']:
+                        trends[date_str]['projects'][project_key]['active_tasks'] += 1
+
+        except Exception as e:
+            print(f"Error processing issue {issue.key}: {str(e)}")
+            continue
+
+    return {
+        'daily_trends': trends,
+        'projects': sorted(list(set(p for d in trends.values() for p in d['projects'].keys())))
+    }
 
 @app.route('/api/assignees', methods=['GET'])
 @swag_from({
     'tags': ['Assignees'],
-    'summary': 'Get list of assignees from JIRA projects',
+    'summary': 'Search for assignees by name and project',
     'parameters': [
         {
             'name': 'search',
             'in': 'query',
             'type': 'string',
             'required': False,
-            'description': 'Search term to filter assignees'
+            'description': 'Search term for assignee name'
         },
         {
             'name': 'projects',
             'in': 'query',
             'type': 'string',
             'required': False,
-            'description': 'Comma-separated list of project keys'
+            'description': 'Comma-separated list of project keys to filter assignees'
         }
     ],
     'responses': {
@@ -243,16 +388,20 @@ def get_dashboard_data():
                             'properties': {
                                 'accountId': {'type': 'string'},
                                 'displayName': {'type': 'string'},
-                                'emailAddress': {'type': 'string'}
+                                'emailAddress': {'type': 'string'},
+                                'active': {'type': 'boolean'}
                             }
                         }
                     }
                 }
             }
+        },
+        400: {
+            'description': 'Bad Request'
         }
     }
 })
-def get_assignees():
+def search_assignees():
     try:
         jira = connect_jira()
         search_term = request.args.get('search', '')
@@ -296,7 +445,8 @@ def get_assignees():
             {
                 'accountId': a.accountId,
                 'displayName': a.displayName,
-                'emailAddress': getattr(a, 'emailAddress', '')
+                'emailAddress': getattr(a, 'emailAddress', ''),
+                'active': True
             }
             for a in assignees
             if not search_term or search_term.lower() in a.displayName.lower()
@@ -307,7 +457,7 @@ def get_assignees():
         
         return jsonify({'assignees': assignee_list})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/api/tickets', methods=['POST'])
 @swag_from({
@@ -563,6 +713,631 @@ def create_bulk_tickets():
             'message': f'Successfully created {len(success_tickets)} tickets, {len(failed_tickets)} failed'
         }), 201
 
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def get_ticket_data(issue):
+    """Extract ticket data including work logs from comments"""
+    try:
+        # Calculate lifecycle times
+        durations = calculate_ticket_durations(issue.changelog, issue.fields.created)
+        
+        ticket = {
+            'key': issue.key,
+            'summary': issue.fields.summary,
+            'status': issue.fields.status.name,
+            'assignee': issue.fields.assignee.displayName if issue.fields.assignee else None,
+            'created': issue.fields.created,
+            'updated': issue.fields.updated,
+            'estimate': 0,  # Initialize with 0
+            'logged': 0     # Initialize with 0
+        }
+
+        # Safely get estimate
+        try:
+            if hasattr(issue.fields, 'timeoriginalestimate') and issue.fields.timeoriginalestimate:
+                ticket['estimate'] = issue.fields.timeoriginalestimate / 3600
+        except (AttributeError, TypeError):
+            pass
+
+        # Safely get logged time
+        try:
+            if hasattr(issue.fields, 'worklog') and issue.fields.worklog:
+                ticket['logged'] = sum(
+                    (wl.timeSpentSeconds or 0) 
+                    for wl in issue.fields.worklog.worklogs
+                ) / 3600
+        except (AttributeError, TypeError):
+            pass
+
+        # Get status changes for changelog
+        for history in issue.changelog.histories:
+            for item in history.items:
+                if item.field == 'status':
+                    ticket['changelog'].append({
+                        'field': item.field,
+                        'fromString': item.fromString,
+                        'toString': item.toString,
+                        'created': history.created
+                    })
+
+        # Extract work logs from comments
+        if hasattr(issue.fields, 'comment') and issue.fields.comment:
+            for comment in issue.fields.comment.comments:
+                # Look for work log patterns
+                if '[work:' in comment.body.lower():
+                    hours = extract_hours_from_comment(comment.body)
+                    if hours > 0:
+                        comment_date = datetime.strptime(comment.created, '%Y-%m-%dT%H:%M:%S.%f%z')
+                        work_log = {
+                            'ticket_key': issue.key,
+                            'summary': issue.fields.summary,
+                            'hours': hours,
+                            'comment': comment.body,
+                            'date': comment_date.isoformat(),
+                            'author': comment.author.displayName,
+                            'project': issue.fields.project.key,
+                            'status': issue.fields.status.name
+                        }
+                        ticket['work_logs'].append(work_log)
+
+        return ticket
+    except Exception as e:
+        return {
+            'key': issue.key,
+            'summary': issue.fields.summary if hasattr(issue.fields, 'summary') else 'No Summary',
+            'status': issue.fields.status.name if hasattr(issue.fields, 'status') else 'Unknown',
+            'assignee': None,
+            'created': issue.fields.created if hasattr(issue.fields, 'created') else None,
+            'updated': issue.fields.updated if hasattr(issue.fields, 'updated') else None,
+            'estimate': 0,
+            'logged': 0,
+            'project': issue.fields.project.key if hasattr(issue.fields, 'project') else 'Unknown',
+            'time_to_start': 0,
+            'time_to_complete': 0,
+            'changelog': [],
+            'work_logs': []
+        }
+
+def calculate_working_hours(total_seconds):
+    """Calculate actual working hours excluding non-working hours"""
+    WORK_START_HOUR = 9  # 9 AM
+    WORK_END_HOUR = 17   # 5 PM
+    SECONDS_PER_HOUR = 3600
+    
+    total_hours = total_seconds / SECONDS_PER_HOUR
+    working_hours = 0
+    
+    # Cap at 8 hours per day
+    days = int(total_hours / 24)
+    remaining_hours = total_hours % 24
+    
+    # Add full working days
+    working_hours += days * 8
+    
+    # Add remaining hours if within working hours
+    if remaining_hours > 0:
+        working_hours += min(remaining_hours, 8)
+    
+    return working_hours
+
+def extract_hours_from_comment(comment):
+    """Extract hours from work progress comment"""
+    import re
+    
+    # Look for patterns like [work: 4h], [Work: 4 hours], [work: 4], etc.
+    patterns = [
+        r'\[work:\s*(\d+\.?\d*)h?\]',
+        r'\[Work:\s*(\d+\.?\d*)h?\]',
+        r'\[work:\s*(\d+\.?\d*)\s*hours?\]',
+        r'\[Work:\s*(\d+\.?\d*)\s*hours?\]',
+        r'\[progress:\s*(\d+\.?\d*)\s*hours?\]',
+        r'\[Progress:\s*(\d+\.?\d*)\s*hours?\]',
+        r'\[done:\s*(\d+\.?\d*)h?\]',
+        r'\[Done:\s*(\d+\.?\d*)h?\]'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, comment)  # Removed .lower() to match case-sensitive patterns
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                continue
+    
+    return 0
+
+@app.route('/api/log-work', methods=['POST'])
+@swag_from({
+    'tags': ['Work Logs'],
+    'summary': 'Log work hours for a specific ticket',
+    'parameters': [
+        {
+            'name': 'body',
+            'in': 'body',
+            'required': True,
+            'schema': {
+                'type': 'object',
+                'required': ['ticketKey', 'hours', 'comment'],
+                'properties': {
+                    'ticketKey': {
+                        'type': 'string',
+                        'description': 'JIRA ticket key (e.g., TP-123)'
+                    },
+                    'hours': {
+                        'type': 'number',
+                        'description': 'Number of hours worked'
+                    },
+                    'comment': {
+                        'type': 'string',
+                        'description': 'Work log comment'
+                    },
+                    'date': {
+                        'type': 'string',
+                        'format': 'date-time',
+                        'description': 'Optional: Work log date (ISO format)'
+                    }
+                }
+            }
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Success',
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean'},
+                    'message': {'type': 'string'},
+                    'data': {
+                        'type': 'object',
+                        'properties': {
+                            'ticket_key': {'type': 'string'},
+                            'hours': {'type': 'number'},
+                            'comment': {'type': 'string'},
+                            'date': {'type': 'string'},
+                            'work_log_id': {'type': 'string'},
+                            'comment_id': {'type': 'string'}
+                        }
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Bad Request'
+        }
+    }
+})
+def log_work():
+    """Log work hours for a specific ticket"""
+    try:
+        # Connect to Jira
+        jira = connect_jira()
+        
+        # Extract data from request
+        data = request.json
+        ticket_key = data['ticketKey']
+        hours = float(data['hours'])
+        comment = data['comment']
+        
+        # Use current date/time if no date provided, format for Jira
+        work_date = datetime.now()
+        if data.get('date'):
+            work_date = datetime.fromisoformat(data['date'].replace('Z', '+00:00'))
+        
+        # Format date for Jira worklog (yyyy-MM-dd HH:mm)
+        work_date_str = work_date.strftime('%Y-%m-%d %H:%M')
+        
+        # Get the issue
+        issue = jira.issue(ticket_key)
+        
+        # Format the work log comment with standard format
+        work_comment = f"[work: {hours}h] {comment}"
+        
+        # Add the comment
+        new_comment = jira.add_comment(issue, work_comment)
+        
+        # Add worklog with properly formatted date
+        worklog = jira.add_worklog(
+            issue=issue,
+            timeSpentSeconds=int(hours * 3600),
+            started=work_date_str,
+            comment=comment
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'Work logged successfully',
+            'data': {
+                'ticket_key': ticket_key,
+                'hours': hours,
+                'comment': work_comment,
+                'date': work_date_str,
+                'work_log_id': worklog.id,
+                'comment_id': new_comment.id
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 400
+
+@app.route('/api/work-logs', methods=['GET'])
+@swag_from({
+    'tags': ['Work Logs'],
+    'summary': 'Get work logs filtered by assignee, tickets, and date range',
+    'parameters': [
+        {
+            'name': 'ticket_keys',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Optional: Comma-separated list of ticket keys (e.g., TP-123,TP-124)'
+        },
+        {
+            'name': 'assignee',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Optional: Filter work logs by assignee'
+        },
+        {
+            'name': 'start_date',
+            'in': 'query',
+            'type': 'string',
+            'format': 'date-time',
+            'required': False,
+            'description': 'Start date for work logs (ISO format). Defaults to 30 days ago.'
+        },
+        {
+            'name': 'end_date',
+            'in': 'query',
+            'type': 'string',
+            'format': 'date-time',
+            'required': False,
+            'description': 'End date for work logs (ISO format). Defaults to current date.'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Success',
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'success': {'type': 'boolean'},
+                    'data': {
+                        'type': 'object',
+                        'additionalProperties': {
+                            'type': 'object',
+                            'properties': {
+                                'total_hours': {'type': 'number'},
+                                'tickets': {'type': 'array', 'items': {'type': 'string'}},
+                                'logs': {
+                                    'type': 'array',
+                                    'items': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'ticket_key': {'type': 'string'},
+                                            'summary': {'type': 'string'},
+                                            'hours': {'type': 'number'},
+                                            'comment': {'type': 'string'},
+                                            'date': {'type': 'string', 'format': 'date-time'},
+                                            'author': {'type': 'string'},
+                                            'assignee': {'type': 'string'},
+                                            'status': {'type': 'string'}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Bad Request'
+        }
+    }
+})
+def get_work_logs():
+    """Get work logs filtered by assignee, tickets, and date range"""
+    try:
+        jira = connect_jira()
+        
+        # Get query parameters
+        ticket_keys = request.args.get('ticket_keys', '').split(',')
+        assignee = request.args.get('assignee')
+        
+        # Set default date range (last 30 days)
+        end_date = datetime.now(timezone.utc)
+        start_date = end_date - timedelta(days=30)
+        
+        # Override with provided dates if they exist
+        if request.args.get('start_date'):
+            start_date = datetime.fromisoformat(request.args.get('start_date').replace('Z', '+00:00'))
+        if request.args.get('end_date'):
+            end_date = datetime.fromisoformat(request.args.get('end_date').replace('Z', '+00:00'))
+            
+        # Format dates for JQL
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        end_date_str = end_date.strftime('%Y-%m-%d')
+        
+        # Build JQL query
+        jql_parts = []
+        
+        # Add ticket filter if provided
+        if ticket_keys and ticket_keys[0]:
+            jql_parts.append(f'key in ({",".join(ticket_keys)})')
+            
+        # Add assignee filter if provided
+        if assignee:
+            jql_parts.append(f'assignee = "{assignee}"')
+            
+        # Add date range
+        jql_parts.append(f'updated >= "{start_date_str}"')
+        jql_parts.append(f'updated <= "{end_date_str}"')
+            
+        jql_query = ' AND '.join(jql_parts)
+        
+        # Get issues with comments
+        issues = jira.search_issues(jql_query, maxResults=1000, expand='changelog,comments')
+        
+        # Process work logs
+        work_logs = []
+        for issue in issues:
+            if hasattr(issue.fields, 'comment') and issue.fields.comment:
+                for comment in issue.fields.comment.comments:
+                    comment_date = datetime.strptime(comment.created, '%Y-%m-%dT%H:%M:%S.%f%z')
+                    
+                    if '[work:' in comment.body.lower():
+                        if assignee and comment.author.displayName != assignee:
+                            continue
+                            
+                        hours = extract_hours_from_comment(comment.body)
+                        if hours > 0:
+                            work_log = {
+                                'ticket_key': issue.key,
+                                'summary': issue.fields.summary,
+                                'hours': hours,
+                                'comment': comment.body,
+                                'date': comment_date.isoformat(),
+                                'author': comment.author.displayName,
+                                'assignee': issue.fields.assignee.displayName if issue.fields.assignee else None,
+                                'status': issue.fields.status.name
+                            }
+                            work_logs.append(work_log)
+        
+        # Group work logs by date
+        daily_work = {}
+        for log in work_logs:
+            date = log['date'].split('T')[0]
+            if date not in daily_work:
+                daily_work[date] = {
+                    'total_hours': 0,
+                    'tickets': set(),
+                    'logs': []
+                }
+            
+            daily_work[date]['total_hours'] += log['hours']
+            daily_work[date]['tickets'].add(log['ticket_key'])
+            daily_work[date]['logs'].append(log)
+        
+        # Convert sets to lists for JSON serialization
+        for date in daily_work:
+            daily_work[date]['tickets'] = list(daily_work[date]['tickets'])
+        
+        return jsonify({
+            'success': True,
+            'data': daily_work
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 400
+
+@app.route('/api/dashboard', methods=['GET'])
+@swag_from({
+    'tags': ['Dashboard'],
+    'summary': 'Get dashboard data including metrics, trends and tickets',
+    'parameters': [
+        {
+            'name': 'time_range',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Time range for metrics (e.g., 7d, 1m, 3m, 6m, all). Defaults to 1m',
+            'enum': ['7d', '1m', '3m', '6m', 'all']
+        },
+        {
+            'name': 'projects',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Comma-separated list of project keys (e.g., THC,TEC,TP)'
+        },
+        {
+            'name': 'assignees',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Comma-separated list of assignee names'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Success',
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'engineers_data': {'type': 'object'},
+                    'daily_metrics': {'type': 'object'},
+                    'lifecycle_trends': {'type': 'object'},
+                    'tickets': {'type': 'array'},
+                    'performance_metrics': {'type': 'object'}
+                }
+            }
+        },
+        500: {
+            'description': 'Server Error'
+        }
+    }
+})
+def get_dashboard_data():
+    try:
+        jira = connect_jira()
+        time_range = request.args.get('time_range', '1m')
+        projects = request.args.get('projects', '').split(',')
+        assignees = request.args.get('assignees', '').split(',')
+        
+        # Calculate date range based on time_range
+        end_date = datetime.now()
+        start_date = end_date - {
+            '7d': timedelta(days=7),
+            '1m': timedelta(days=30),
+            '3m': timedelta(days=90),
+            '6m': timedelta(days=180),
+            'all': timedelta(days=365)
+        }.get(time_range, timedelta(days=30))
+        
+        # Build JQL query
+        jql_parts = []
+        
+        if projects and projects[0]:
+            jql_parts.append(f'project in ({",".join(projects)})')
+            
+        if assignees and assignees[0]:
+            jql_parts.append(f'assignee in ({",".join(assignees)})')
+            
+        jql_parts.append(f'updated >= "{start_date.strftime("%Y-%m-%d")}"')
+        jql_query = ' AND '.join(jql_parts)
+        
+        # Fetch issues with all required data
+        issues = jira.search_issues(
+            jql_query,
+            maxResults=1000,
+            expand='changelog,worklog'
+        )
+        
+        # Initialize data structures
+        engineers_data = {}
+        tickets = []
+        performance_metrics = {
+            'avg_time_to_start': 0,
+            'avg_time_to_complete': 0,
+            'completed_tickets': 0,
+            'in_progress_tickets': 0
+        }
+        
+        # Process each issue
+        for issue in issues:
+            # Extract ticket data
+            ticket = {
+                'key': issue.key,
+                'summary': issue.fields.summary,
+                'status': issue.fields.status.name,
+                'assignee': issue.fields.assignee.displayName if issue.fields.assignee else None,
+                'created': issue.fields.created,
+                'updated': issue.fields.updated,
+                'estimate': 0,  # Initialize with 0
+                'logged': 0     # Initialize with 0
+            }
+            
+            # Safely get estimate
+            try:
+                if hasattr(issue.fields, 'timeoriginalestimate') and issue.fields.timeoriginalestimate:
+                    ticket['estimate'] = issue.fields.timeoriginalestimate / 3600
+            except (AttributeError, TypeError):
+                pass
+
+            # Safely get logged time
+            try:
+                if hasattr(issue.fields, 'worklog') and issue.fields.worklog:
+                    ticket['logged'] = sum(
+                        (wl.timeSpentSeconds or 0) 
+                        for wl in issue.fields.worklog.worklogs
+                    ) / 3600
+            except (AttributeError, TypeError):
+                pass
+
+            # Calculate durations
+            durations = calculate_ticket_durations(issue.changelog, issue.fields.created)
+            ticket.update(durations)
+            
+            tickets.append(ticket)
+            
+            # Update engineer data
+            if ticket['assignee']:
+                if ticket['assignee'] not in engineers_data:
+                    engineers_data[ticket['assignee']] = {
+                        'total_estimate': 0,
+                        'total_logged': 0,
+                        'idle_time': 0,
+                        'current_work': 0,
+                        'projects': {},
+                        'time_variance': 0,
+                        'tickets': [],
+                        'performance_metrics': {
+                            'avg_time_to_start': 0,
+                            'avg_time_to_complete': 0,
+                            'completed_tickets': 0,
+                            'in_progress_tickets': 0
+                        }
+                    }
+                
+                eng_data = engineers_data[ticket['assignee']]
+                eng_data['total_estimate'] += ticket['estimate']
+                eng_data['total_logged'] += ticket['logged']
+                eng_data['tickets'].append(ticket)
+                
+                # Update project-specific data
+                project = ticket['key'].split('-')[0]
+                if project not in eng_data['projects']:
+                    eng_data['projects'][project] = {
+                        'total_estimate': 0,
+                        'total_logged': 0,
+                        'ticket_count': 0,
+                        'completed_count': 0,
+                        'active_count': 0,
+                        'bandwidth': 0
+                    }
+                
+                proj_data = eng_data['projects'][project]
+                proj_data['total_estimate'] += ticket['estimate']
+                proj_data['total_logged'] += ticket['logged']
+                proj_data['ticket_count'] += 1
+                
+                if ticket['status'] in ['Done', 'Closed']:
+                    proj_data['completed_count'] += 1
+                else:
+                    proj_data['active_count'] += 1
+        
+        # Calculate daily metrics and lifecycle trends
+        daily_metrics = get_daily_metrics(issues, start_date, end_date)
+        lifecycle_trends = {
+            'daily_trends': daily_metrics['team'],
+            'engineer_trends': daily_metrics['engineers']
+        }
+        
+        # Calculate performance metrics
+        if tickets:
+            performance_metrics.update({
+                'avg_time_to_start': sum(t['time_to_start'] for t in tickets) / len(tickets),
+                'avg_time_to_complete': sum(t['time_to_complete'] for t in tickets) / len(tickets),
+                'completed_tickets': sum(1 for t in tickets if t['status'] in ['Done', 'Closed']),
+                'in_progress_tickets': sum(1 for t in tickets if t['status'] not in ['Done', 'Closed'])
+            })
+        
+        return jsonify({
+            'engineers_data': engineers_data,
+            'daily_metrics': daily_metrics,
+            'lifecycle_trends': lifecycle_trends,
+            'tickets': tickets,
+            'performance_metrics': performance_metrics
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
