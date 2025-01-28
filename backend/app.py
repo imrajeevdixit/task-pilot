@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 # Enable CORS for all routes
 CORS(app, resources={
-    r"/*": {
+r"/*": {
         "origins": "http://localhost:3000",  # Allow all origins in development
         "methods": ["GET", "POST", "OPTIONS"],  # Added POST
         "allow_headers": ["Content-Type", "Accept", "Authorization", "Origin"]
@@ -1340,6 +1340,253 @@ def get_dashboard_data():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/performance/trends', methods=['GET'])
+@swag_from({
+    'tags': ['Performance'],
+    'summary': 'Get performance trends and resource utilization metrics',
+    'parameters': [
+        {
+            'name': 'time_range',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Time range for metrics (e.g., 7d, 1m, 3m, 6m, all). Defaults to 1m',
+            'enum': ['7d', '1m', '3m', '6m', 'all']
+        },
+        {
+            'name': 'projects',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Comma-separated list of project keys'
+        },
+        {
+            'name': 'engineer',
+            'in': 'query',
+            'type': 'string',
+            'required': False,
+            'description': 'Filter metrics for specific engineer'
+        }
+    ],
+    'responses': {
+        200: {
+            'description': 'Success',
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'trends': {
+                        'type': 'object',
+                        'properties': {
+                            'daily_metrics': {
+                                'type': 'object',
+                                'additionalProperties': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'total_logged': {'type': 'number'},
+                                        'total_estimate': {'type': 'number'},
+                                        'active_resources': {'type': 'array', 'items': {'type': 'string'}},
+                                        'idle_resources': {'type': 'number'},
+                                        'idle_hours': {'type': 'number'},
+                                        'variance': {'type': 'number'},
+                                        'variance_percentage': {'type': 'number'},
+                                        'avg_hours_per_resource': {'type': 'number'}
+                                    }
+                                }
+                            },
+                            'summary': {
+                                'type': 'object',
+                                'properties': {
+                                    'total_resources': {'type': 'number'},
+                                    'total_working_days': {'type': 'number'},
+                                    'total_available_hours': {'type': 'number'},
+                                    'total_logged_hours': {'type': 'number'},
+                                    'total_estimated_hours': {'type': 'number'},
+                                    'variance': {'type': 'number'},
+                                    'variance_percentage': {'type': 'number'},
+                                    'resource_utilization': {'type': 'number'},
+                                    'avg_daily_hours_per_resource': {'type': 'number'}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Bad Request',
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'error': {'type': 'string'}
+                }
+            }
+        }
+    }
+})
+def get_performance_trends():
+    try:
+        jira = connect_jira()
+        time_range = request.args.get('time_range', '1m')
+        projects = request.args.get('projects', '').split(',')
+        engineer = request.args.get('engineer')
+
+        # Calculate date range
+        end_date = datetime.now()
+        start_date = end_date - {
+            '7d': timedelta(days=7),
+            '1m': timedelta(days=30),
+            '3m': timedelta(days=90),
+            '6m': timedelta(days=180),
+            'all': timedelta(days=365)
+        }.get(time_range, timedelta(days=30))
+
+        # Build JQL query
+        jql_parts = []
+        if projects and projects[0]:
+            jql_parts.append(f'project in ({",".join(projects)})')
+        if engineer:
+            jql_parts.append(f'assignee = "{engineer}"')
+        jql_parts.append(f'updated >= "{start_date.strftime("%Y-%m-%d")}"')
+        jql_query = ' AND '.join(jql_parts)
+
+        # Fetch issues
+        issues = jira.search_issues(
+            jql_query,
+            maxResults=1000,
+            expand='changelog,worklog'
+        )
+
+        # Calculate working days in the period
+        total_days = (end_date - start_date).days
+        working_days = sum(1 for d in (start_date + timedelta(days=x) for x in range(total_days))
+                          if d.weekday() < 5)  # Excluding weekends
+        
+        # Initialize data structures
+        resources_data = {}
+        daily_metrics = {}
+        total_resources = set()
+        daily_deviations = {}  # Track deviations for each day
+
+        for issue in issues:
+            assignee = issue.fields.assignee.displayName if issue.fields.assignee else "Unassigned"
+            total_resources.add(assignee)
+            
+            # Get estimate in hours
+            estimate = (issue.fields.timeoriginalestimate or 0) / 3600
+            
+            # Calculate logged time per day
+            if hasattr(issue.fields, 'worklog') and issue.fields.worklog:
+                for worklog in issue.fields.worklog.worklogs:
+                    work_date = datetime.strptime(worklog.started[:10], '%Y-%m-%d')
+                    if start_date <= work_date <= end_date:
+                        date_str = work_date.strftime('%Y-%m-%d')
+                        logged_hours = worklog.timeSpentSeconds / 3600
+                        
+                        # Initialize daily metrics and deviations
+                        if date_str not in daily_metrics:
+                            daily_metrics[date_str] = {
+                                'total_logged': 0,
+                                'total_estimate': 0,
+                                'active_resources': set(),
+                                'deviations': [],  # Store individual task deviations
+                                'std_deviation': 0,
+                                'mean_deviation': 0,
+                                'total_resources_count': len(total_resources),  # Add total resources count
+                                'resource_hours': {}  # Track hours per resource
+                            }
+                            daily_deviations[date_str] = []
+                        
+                        # Initialize resource tracking if not exists
+                        if assignee not in daily_metrics[date_str]['resource_hours']:
+                            daily_metrics[date_str]['resource_hours'][assignee] = {
+                                'active_hours': 0,  # Hours from In Progress tasks
+                                'total_hours': 8,   # Total available hours per day
+                                'idle_hours': 8     # Initialize with full day as idle
+                            }
+                        
+                        # Update active hours only if task is In Progress
+                        if issue.fields.status.name == 'In Progress':
+                            resource_hours = daily_metrics[date_str]['resource_hours'][assignee]
+                            resource_hours['active_hours'] += logged_hours
+                            resource_hours['idle_hours'] = max(0, resource_hours['total_hours'] - resource_hours['active_hours'])
+                            daily_metrics[date_str]['active_resources'].add(assignee)
+                        
+                        daily_metrics[date_str]['total_logged'] += logged_hours
+                        daily_metrics[date_str]['total_estimate'] += estimate
+                        
+                        # Calculate and store deviation for this task
+                        if estimate > 0:  # Only consider tasks with estimates
+                            deviation_percentage = ((logged_hours - estimate) / estimate) * 100
+                            daily_metrics[date_str]['deviations'].append(deviation_percentage)
+                        else:
+                            # If no estimate, consider it a 100% deviation if there are logged hours
+                            if logged_hours > 0:
+                                daily_metrics[date_str]['deviations'].append(100)
+
+        # Calculate metrics
+        total_resources_count = len(total_resources)
+        total_available_hours = working_days * 8 * total_resources_count
+        total_logged_hours = sum(day['total_logged'] for day in daily_metrics.values())
+        total_estimated_hours = sum(day['total_estimate'] for day in daily_metrics.values())
+        all_deviations = []  # Store all deviations for overall statistics
+
+        # Calculate daily averages, idle resources, and statistical measures
+        for date, metrics in daily_metrics.items():
+            active_count = len(metrics['active_resources'])
+            
+            # Calculate average active and idle hours across all resources
+            total_active_hours = sum(r['active_hours'] for r in metrics['resource_hours'].values())
+            total_idle_hours = sum(r['idle_hours'] for r in metrics['resource_hours'].values())
+            
+            metrics['avg_active_hours'] = total_active_hours / total_resources_count if total_resources_count > 0 else 0
+            metrics['avg_idle_hours'] = total_idle_hours / total_resources_count if total_resources_count > 0 else 0
+            metrics['idle_resources'] = total_resources_count - active_count
+            metrics['avg_hours_per_resource'] = metrics['total_logged'] / total_resources_count if total_resources_count > 0 else 0
+            
+            # Convert set to list for JSON serialization
+            metrics['active_resources'] = list(metrics['active_resources'])
+            
+            # Calculate statistical measures if we have deviations
+            deviations = metrics['deviations']
+            if deviations:
+                mean_deviation = sum(deviations) / len(deviations)
+                metrics['mean_deviation'] = mean_deviation
+                
+                squared_diff_sum = sum((x - mean_deviation) ** 2 for x in deviations)
+                metrics['std_deviation'] = (squared_diff_sum / len(deviations)) ** 0.5
+                
+                all_deviations.extend(deviations)
+            
+            # Remove raw data from response
+            metrics.pop('deviations', None)
+            metrics.pop('resource_hours', None)  # Remove detailed resource hours from response
+
+        # Calculate overall statistics
+        overall_mean_deviation = sum(all_deviations) / len(all_deviations) if all_deviations else 0
+        squared_diff_sum = sum((x - overall_mean_deviation) ** 2 for x in all_deviations) if all_deviations else 0
+        overall_std_deviation = (squared_diff_sum / len(all_deviations)) ** 0.5 if all_deviations else 0
+
+        return jsonify({
+            'trends': {
+                'daily_metrics': daily_metrics,
+                'summary': {
+                    'total_resources': total_resources_count,
+                    'total_working_days': working_days,
+                    'total_available_hours': total_available_hours,
+                    'total_logged_hours': total_logged_hours,
+                    'total_estimated_hours': total_estimated_hours,
+                    'mean_deviation': overall_mean_deviation,
+                    'std_deviation': overall_std_deviation,
+                    'resource_utilization': (total_logged_hours / total_available_hours * 100) if total_available_hours > 0 else 0,
+                    'avg_daily_hours_per_resource': total_logged_hours / (total_resources_count * working_days) if total_resources_count * working_days > 0 else 0
+                }
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
 
 if __name__ == '__main__':
     app.run(host='localhost', port=5000, debug=True)

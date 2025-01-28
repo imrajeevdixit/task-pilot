@@ -6,7 +6,7 @@ import {
   CircularProgress, Alert, Button, ListItemText, List, ListItem, ListItemButton,
   Checkbox
 } from '@mui/material';
-import { getDashboardData } from '../services/api';
+import { getDashboardData, getPerformanceTrends } from '../services/api';
 import MetricsCard from './MetricsCard';
 import AssigneeSelect from './AssigneeSelect';
 import ExpandableBarGraph from './ExpandableBarGraph';
@@ -38,6 +38,13 @@ export default function Dashboard() {
       selectedAssignees.map(a => a.accountId).join(',')
     ),
     enabled: true,
+  });
+
+  // Add performance trends query
+  const { data: performanceTrends } = useQuery({
+    queryKey: ['performanceTrends', timeRange, selectedProjects],
+    queryFn: () => getPerformanceTrends(timeRange, selectedProjects.join(',')),
+    enabled: !!selectedProjects.length
   });
 
   // Add debug logging
@@ -194,10 +201,7 @@ export default function Dashboard() {
       <Grid container spacing={3}>
         {/* Team Performance Overview */}
         <Grid item xs={12}>
-          <ExpandableBarGraph 
-            data={data?.engineers_data || {}} 
-            dailyMetrics={data?.daily_metrics || {}}
-          />
+          <ExpandableBarGraph performanceTrends={performanceTrends} />
         </Grid>
 
         {/* Split View Section */}

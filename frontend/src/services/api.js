@@ -2,6 +2,14 @@ import axios from 'axios';
 
 const API_BASE_URL = process.env.FLASK_APP_URL || 'http://127.0.0.1:5000';
 
+// Helper function to handle API responses
+const handleResponse = async (response) => {
+  if (!response.ok) {
+    throw new Error('API request failed');
+  }
+  return response.json();
+};
+
 export const getDashboardData = async (timeRange, projects, assignees) => {
   const params = new URLSearchParams({
     time_range: timeRange,
@@ -78,7 +86,7 @@ export const createBulkTickets = async (tickets) => {
 };
 
 export const logWorkHours = async (ticketKey, hours, comment, date = null) => {
-  const response = await fetch('/api/log-work', {
+  const response = await fetch(`${API_BASE_URL}/api/log-work`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -139,5 +147,15 @@ export const getProjectDistribution = async (assignee, projects) => {
   });
   
   const response = await fetch(`${API_BASE_URL}/api/projects/distribution?${params}`);
+  return handleResponse(response);
+};
+
+export const getPerformanceTrends = async (timeRange, projects) => {
+  const params = new URLSearchParams({
+    time_range: timeRange,
+    projects: projects
+  });
+  
+  const response = await fetch(`${API_BASE_URL}/api/performance/trends?${params}`);
   return handleResponse(response);
 }; 
