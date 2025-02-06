@@ -9,7 +9,12 @@ import {
   ToggleButtonGroup,
   ToggleButton,
   Grid,
-  Tooltip
+  Tooltip,
+  CircularProgress,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem
 } from '@mui/material';
 import {
   BarChart,
@@ -23,70 +28,83 @@ import {
   CartesianGrid,
   ResponsiveContainer,
   Legend,
+  rect,
+  Pattern,
   Tooltip as RechartsTooltip,
   ReferenceLine
 } from 'recharts';
 import { ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
 import BarChartIcon from '@mui/icons-material/BarChart';
 
-export default function ExpandableBarGraph({ performanceTrends }) {
+export default function ExpandableBarGraph({ ALL_PROJECTS, performanceTrends, isLoader }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedView, setSelectedView] = useState('efficiency');
+  const [selectProject, setSelectProject] = useState("")
 
   const handleExpandClick = () => {
     setExpanded(!expanded);
   };
 
+  const getRandomColor = () => {
+    return `#${Math.floor(Math.random() * 16777215).toString(16)}`;
+  };
+
   // Format the data for charts
   const chartData = React.useMemo(() => {
     if (!performanceTrends?.trends?.daily_metrics) return [];
-    
-    return Object.entries(performanceTrends.trends.daily_metrics)
-      .map(([date, metrics]) => {
-        // Ensure all numeric values are properly converted to numbers
-        const resourceUtilization = metrics.total_resources_count > 0 
-          ? (metrics.total_logged / (8 * metrics.total_resources_count)) * 100 
-          : 0;
 
-        return {
-          date: new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-          meanDeviation: Number(metrics.mean_deviation || 0),
-          stdDeviation: Number(metrics.std_deviation || 0),
-          resourceUtilization: Number(resourceUtilization.toFixed(1)),
-          activeResources: Number(metrics.active_resources.length || 0),
-          idleResources: Number(metrics.idle_resources || 0),
-          totalLogged: Number(metrics.total_logged || 0),
-          idleHours: Number(metrics.idle_hours || 0),
-          totalEstimate: Number(metrics.total_estimate || 0),
-          avgHoursPerResource: Number(metrics.avg_hours_per_resource || 0)
-        };
-      })
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
+    return Object.keys(performanceTrends.trends.daily_metrics)
+      .map((item) => {
+        let obj = { date: item }
+
+        ALL_PROJECTS.map(it => {
+          obj[`${it}_meanDeviation`] = Number(performanceTrends.trends.daily_metrics?.[item]?.[it]?.mean_deviation || 0);
+          obj[`${it}_stdDeviation`] = Number(performanceTrends.trends.daily_metrics?.[item]?.[it]?.std_deviation || 0)
+          obj[`${it}_activeResources`] = Number(performanceTrends.trends.daily_metrics?.[item]?.[it]?.active_resources?.length || 0);
+          obj[`${it}_idleResources`] = Number(performanceTrends.trends.daily_metrics?.[item]?.[it]?.idle_resources || 0)
+          obj[`${it}_totalLogged`] = Number(performanceTrends.trends.daily_metrics?.[item]?.[it]?.avg_active_hours?.toFixed(2) || 0);
+          obj[`${it}_idleHours`] = Number(performanceTrends.trends.daily_metrics?.[item]?.[it]?.avg_idle_hours?.toFixed(2) || 0)
+        })
+        return obj
+      }).sort((a, b) => {
+        return parseInt(a.date.replace("Week", "")) - parseInt(b.date.replace("Week", ""));
+      });
+
   }, [performanceTrends]);
 
-  const summary = performanceTrends?.trends?.summary || {};
+  const chartDataEpicMetrics = React.useMemo(() => {
+    if (!performanceTrends?.epic_metrics) return { projects: [], epic_metrics: [] }
 
-  const MetricCard = ({ title, value, description, format = 'number' }) => (
-    <Card>
-      <CardContent>
-        <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
-          <Typography color="textSecondary" variant="subtitle2">
-            {title}
-          </Typography>
-          <Tooltip title={description}>
-            <IconButton size="small">
-              <BarChartIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </Box>
-        <Typography variant="h4" component="div">
-          {format === 'percent' ? `${Number(value).toFixed(1)}%` :
-           format === 'hours' ? `${Number(value).toFixed(1)}h` :
-           Number(value).toFixed(1)}
-        </Typography>
-      </CardContent>
-    </Card>
-  );
+    return {
+      projects: [selectProject],
+      epic_metrics: Object.keys(performanceTrends.epic_metrics)
+        .map((item) => {
+          if (item.split("-")[0] === selectProject) {
+            let obj = { epic_metrics: item }
+
+            Object.keys(performanceTrends.epic_metrics[item]).map(it => {
+              obj.overallProgress = (Number(
+                (performanceTrends.epic_metrics?.[item]?.done + performanceTrends.epic_metrics?.[item]?.closed) /
+                performanceTrends.epic_metrics?.[item]?.total_tasks) * 100)?.toFixed(2)
+              obj.breachedTask = Number(performanceTrends.epic_metrics?.[item]?.breached_tasks)
+              obj.averageDelta = Number(performanceTrends.epic_metrics?.[item]?.avg_delay_days)
+              obj.riskEstimate = performanceTrends.epic_metrics?.[item]?.risk_estimate
+            })
+            return obj
+          }
+        }).filter(Boolean)
+    }
+
+  }, [performanceTrends, selectProject]);
+
+  const projectColors = { 
+    TEST: "#f5a185",
+    TEC: "#3fd8d1",
+    THC: "#e8873e",
+    TPC: "#ac8332",
+    TPO: "#6aecc6",
+    TWCP: "#18e94a",
+   }
 
   return (
     <Card>
@@ -110,172 +128,369 @@ export default function ExpandableBarGraph({ performanceTrends }) {
             <ExpandMoreIcon />
           </IconButton>
         </Box>
-
         <Collapse in={expanded}>
           {/* Summary Metrics */}
-          <Grid container spacing={2} sx={{ mb: 3 }}>
-            <Grid item xs={12} md={6}>
-              <MetricCard
-                title="Estimation Bias"
-                value={summary.mean_deviation}
-                description={`On average, tasks are ${Math.abs(summary.mean_deviation || 0).toFixed(1)}% ${(summary.mean_deviation || 0) > 0 ? 'overestimated' : 'underestimated'}`}
-                format="percent"
-              />
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <MetricCard
-                title="Estimation Consistency (σ)"
-                value={summary.std_deviation}
-                description="Standard deviation of estimates - lower values indicate more consistent estimation accuracy"
-                format="percent"
-              />
-            </Grid>
-          </Grid>
+          {isLoader ? (
+            <Box display="flex" justifyContent="center" alignItems="center" minHeight="100vh">
+              <CircularProgress />
+            </Box>
+          ) : (
+            <>
+              {/* View Selection */}
+              <Box sx={{ mb: 5 }}>
+                <ToggleButtonGroup
+                  value={selectedView}
+                  exclusive
+                  onChange={(_, value) => value && setSelectedView(value)}
+                  size="small"
+                  style={{ display: "block" }}
+                >
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="efficiency">Estimation Accuracy</ToggleButton>
+                  </Tooltip>
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="resources">Resource Distribution</ToggleButton>
+                  </Tooltip>
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="hours">Time Analysis</ToggleButton>
+                  </Tooltip>
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="epic">Epic Analysis</ToggleButton>
+                  </Tooltip>
+                  <div style={{ float: "right" }}>
+                    <div style={{ display: 'flex', flexDirection: 'row', marginLeft: '10px' }}>
+                      {['efficiency', 'hours'].includes(selectedView) && (<>
+                        <Tooltip title={selectedView === "efficiency" ?
+                          "Shows the variation from the mean. Represents the spread of data." :
+                          "Idle Hours in %"
+                        }>
+                          <div style={{ display: 'flex', alignItems: 'center', marginBottom: '5px', cursor: 'pointer' }}>
+                            <div
+                              style={{
+                                width: '20px',
+                                height: '3px',
+                                marginRight: '5px',
+                                borderBottom: '3px dashed'
+                              }}
+                            />
+                            <span>{selectedView === "efficiency" ? "Standard Deviation" : "Idle Hours in %"}</span>
+                          </div>
+                        </Tooltip>
 
-          {/* View Selection */}
-          <Box sx={{ mb: 3 }}>
-            <ToggleButtonGroup
-              value={selectedView}
-              exclusive
-              onChange={(_, value) => value && setSelectedView(value)}
-              size="small"
-            >
-              <ToggleButton value="efficiency">Estimation Accuracy</ToggleButton>
-              <ToggleButton value="resources">Resource Distribution</ToggleButton>
-              <ToggleButton value="hours">Time Analysis</ToggleButton>
-            </ToggleButtonGroup>
-          </Box>
+                        <Tooltip title={selectedView === "efficiency" ?
+                          "Represents the average absolute deviation from the estimated value." :
+                          "Idle Hours in %"
+                        }>
+                          <div style={{ display: 'flex', alignItems: 'center', marginBottom: '5px', marginLeft: "10px", cursor: 'pointer' }}>
+                            <div
+                              style={{
+                                width: '20px',
+                                height: '3px',
+                                marginRight: '5px',
+                                borderBottom: '3px solid'
+                              }}
+                            />
+                            <span>{selectedView === "efficiency" ? "Mean Deviation" : "Total Logged Hours in %"}</span>
+                          </div>
+                        </Tooltip>
+                      </>)}
+                      {selectedView === "epic" && [{ title: "", value: "OverAll Progress(%)", color: "#2ee816" }, { title: "", value: "Breached Task", color: "#117f74" }, { title: "", value: "Average Delta in Days", color: "#3cc8c9" }, { title: "", value: "Risk Estimate", color: "#a7768a" }].map((item) => (
+                        <Tooltip title={item.title}>
+                          <div style={{ display: 'flex', alignItems: 'center', marginBottom: '5px', marginLeft: "10px", cursor: 'pointer' }}>
+                            <div
+                              style={{
+                                width: '20px',
+                                height: '3px',
+                                marginRight: '5px',
+                                borderBottom: `4px solid ${item.color}`
+                              }}
+                            />
+                            <span>{item.value}</span>
+                          </div>
+                        </Tooltip>
+                      ))}
+                    </div>
+                    {selectedView === "epic" && (
+                      <div style={{ float: "right", marginBottom: 15 }}>
+                        <FormControl sx={{ minWidth: 200 }}>
+                          <InputLabel>Select Project</InputLabel>
+                          <Select
+                            value={selectProject}
+                            onChange={(e) => setSelectProject(e.target.value)}
+                            label="Select Project"
+                            style={{ height: 50, width: 200 }}
+                          >
+                            {ALL_PROJECTS.map((project) => (
+                              <MenuItem key={project} value={project}>
+                                {project}
+                              </MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </div>
+                    )}
+                  </div>
+                </ToggleButtonGroup>
+              </Box>
 
-          {/* Charts */}
-          <Box sx={{ height: 400 }}>
-            {selectedView === 'efficiency' && (
-              <ResponsiveContainer>
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis 
-                    dataKey="date"
-                    label={{ 
-                      value: 'Date', 
-                      position: 'insideBottom', 
-                      offset: -5 
-                    }}
-                  />
-                  <YAxis 
-                    domain={['auto', 'auto']}
-                    label={{ 
-                      value: 'Deviation from Estimates (%)', 
-                      angle: -90, 
-                      position: 'insideLeft',
-                      offset: 10
-                    }}
-                    tickFormatter={(value) => `${value.toFixed(0)}%`}
-                  />
-                  <RechartsTooltip 
-                    formatter={(value, name) => {
-                      const numValue = Number(value);
-                      if (isNaN(numValue)) return ['-', name];
-                      
-                      let label;
-                      if (name === 'meanDeviation') {
-                        label = 'Mean Deviation';
-                        const direction = numValue > 0 ? 'overestimated' : 'underestimated';
-                        return [`${Math.abs(numValue).toFixed(1)}% ${direction}`, label];
-                      } else if (name === 'stdDeviation') {
-                        label = 'Consistency (σ)';
-                        return [`±${numValue.toFixed(1)}%`, label];
-                      }
-                      return [`${numValue.toFixed(1)}%`, name];
-                    }}
-                    labelFormatter={(label) => `Date: ${label}`}
-                  />
-                  <Legend 
-                    formatter={(value) => {
-                      if (value === 'meanDeviation') return 'Estimation Bias';
-                      if (value === 'stdDeviation') return 'Consistency (σ)';
-                      return value;
-                    }}
-                  />
-                  <ReferenceLine 
-                    y={0} 
-                    stroke="#666" 
-                    strokeDasharray="3 3"
-                    label={{ 
-                      value: 'Perfect Estimation', 
-                      position: 'right',
-                      fill: '#666',
-                      fontSize: 12
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="meanDeviation"
-                    stroke="#8884d8"
-                    name="meanDeviation"
-                    dot={false}
-                    strokeWidth={2}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="stdDeviation"
-                    stroke="#82ca9d"
-                    name="stdDeviation"
-                    dot={false}
-                    strokeWidth={2}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            )}
+              {/* Charts */}
+              <Box sx={{ height: 400 }}>
+                {selectedView === 'efficiency' && (
+                  <ResponsiveContainer>
+                    <LineChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="date"
+                      />
+                      <YAxis
+                        domain={['auto', 'auto']}
+                        label={{
+                          value: 'Deviation from Estimates (%)',
+                          angle: -90,
+                          position: 'insideLeft',
+                          offset: 2
+                        }}
+                        tickFormatter={(value) => `${value.toFixed(0)}%`}
+                      />
+                      <RechartsTooltip
+                        formatter={(value, name) => {
+                          const numValue = Number(value);
+                          if (isNaN(numValue)) return ['-', name];
 
-            {selectedView === 'resources' && (
-              <ResponsiveContainer>
-                <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" />
-                  <YAxis />
-                  <RechartsTooltip />
-                  <Legend />
-                  <Bar
-                    dataKey="activeResources"
-                    fill="#8884d8"
-                    name="Active Resources"
-                  />
-                  <Bar
-                    dataKey="idleResources"
-                    fill="#82ca9d"
-                    name="Idle Resources"
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
+                          let label;
+                          if (name === 'meanDeviation') {
+                            label = 'Mean Deviation';
+                            const direction = numValue > 0 ? 'overestimated' : 'underestimated';
+                            return [`${Math.abs(numValue).toFixed(1)}% ${direction}`, label];
+                          } else if (name === 'stdDeviation') {
+                            label = 'Consistency (σ)';
+                            return [`±${numValue.toFixed(1)}%`, label];
+                          }
+                          return [`${numValue.toFixed(1)}%`, name];
+                        }}
+                        labelFormatter={(label) => `Date: ${label}`}
+                      />
+                      <Legend />
+                      <ReferenceLine
+                        y={0}
+                        stroke="#666"
+                        strokeDasharray="3 3"
+                        label={{
+                          value: 'Perfect Estimation',
+                          position: 'right',
+                          fill: '#666',
+                          fontSize: 12
+                        }}
+                      />
+                      {ALL_PROJECTS.map((item) => (
+                        <>
+                          <Line
+                            type="monotone"
+                            stroke={projectColors[item]}
+                            name={item}
+                            dot={false}
+                            strokeWidth={2}
+                            TooltipType="none"
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey={`${item}_meanDeviation`}
+                            stroke={projectColors[item]}
+                            name={`${item} Mean Deviation`}
+                            dot={false}
+                            strokeWidth={2}
+                            TooltipType="none"
+                            legendType="none"
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey={`${item}_stdDeviation`}
+                            stroke={projectColors[item]}
+                            name={`${item} Standard Deviation`}
+                            dot={false}
+                            strokeWidth={2}
+                            strokeDasharray="10 5"
+                            legendType="none"
+                          />
+                        </>
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
 
-            {selectedView === 'hours' && (
-              <ResponsiveContainer>
-                <AreaChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" />
-                  <YAxis />
-                  <RechartsTooltip />
-                  <Legend />
-                  <Area
-                    type="monotone"
-                    dataKey="totalLogged"
-                    stackId="1"
-                    stroke="#8884d8"
-                    fill="#8884d8"
-                    name="Hours Logged"
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="idleHours"
-                    stackId="1"
-                    stroke="#82ca9d"
-                    fill="#82ca9d"
-                    name="Idle Hours"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </Box>
+                {selectedView === 'resources' && (
+                  <ResponsiveContainer>
+                    <BarChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis
+                        domain={['auto', 'auto']}
+                        label={{
+                          value: 'Number of Resources',
+                          angle: -90,
+                          position: 'insideLeft',
+                          offset: 2
+                        }}
+                      />
+                      <RechartsTooltip />
+                      <Legend />
+                      {ALL_PROJECTS.map((item) => (
+                        <>
+                          <Bar
+                            fill={projectColors[item]}
+                            name={item}
+                          />
+                          <Bar
+                            dataKey={`${item}_activeResources`}
+                            fill={projectColors[item]}
+                            name={`${item} Active Resources`}
+                            legendType="none"
+                          />
+                          <Bar
+                            dataKey={`${item}_idleResources`}
+                            fill={projectColors[item]}
+                            name={`${item} Idle Resources`}
+                            strokeDasharray="10 5"
+                            legendType="none"
+                          />
+                        </>
+                      ))}
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+
+                {selectedView === 'hours' && (
+                  <ResponsiveContainer>
+                    <AreaChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis
+                        domain={['auto', 'auto']}
+                        label={{
+                          value: 'Time Analysis',
+                          angle: -90,
+                          position: 'insideLeft',
+                          offset: 2
+                        }}
+                      />
+                      <RechartsTooltip />
+                      <Legend />
+                      {ALL_PROJECTS.map((item) => (
+                        <>
+                          <Area
+                            type="monotone"
+                            stackId="1"
+                            stroke={projectColors[item]}
+                            fill={projectColors[item]}
+                            name={item}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey={`${item}_totalLogged`}
+                            stackId="1"
+                            stroke={projectColors[item]}
+                            fill={projectColors[item]}
+                            name={`${item} Total Logged Hours in %`}
+                            legendType="none"
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey={`${item}_idleHours`}
+                            stackId="1"
+                            stroke={projectColors[item]}
+                            fill={projectColors[item]}
+                            name={`${item} Idle Hours in %`}
+                            strokeDasharray="10 5"
+                            legendType="none"
+                          />
+                        </>
+                      ))}
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
+
+                {selectedView === 'epic' && (
+                  <>
+                    {selectProject == "" && <div style={{ display: "flex", justifyContent: "center", alignItems: "center", width: "100vw" }}>No Project is selected</div>}
+                    {(selectProject && chartDataEpicMetrics?.epic_metrics?.length === 0) && <div style={{ display: "flex", justifyContent: "center", alignItems: "center", width: "100vw" }}>There will be no data.</div>}
+                    {selectProject && chartDataEpicMetrics?.epic_metrics?.length > 0 &&
+                      (
+                        <ResponsiveContainer>
+                          <LineChart data={chartDataEpicMetrics.epic_metrics}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis
+                              dataKey="epic_metrics"
+                            />
+                            <YAxis
+                              domain={['auto', 'auto']}
+                              label={{
+                                value: 'Epic Wise Metrics',
+                                angle: -90,
+                                position: 'insideLeft',
+                                offset: 2
+                              }}
+                              tickFormatter={(value) => `${value.toFixed(0)}%`}
+                            />
+                            <RechartsTooltip />
+                            <Legend />
+                            <ReferenceLine
+                              y={0}
+                              stroke="#666"
+                              strokeDasharray="3 3"
+                              label={{
+                                value: 'Perfect Estimation',
+                                position: 'right',
+                                fill: '#666',
+                                fontSize: 12
+                              }}
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="overallProgress"
+                              stroke="#2ee816"
+                              name="OverAll Progress(%)"
+                              dot={false}
+                              strokeWidth={2}
+                              TooltipType="none"
+                              legendType="none"
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="breachedTask"
+                              stroke="#117f74"
+                              name="Breached Task"
+                              dot={false}
+                              strokeWidth={2}
+                              TooltipType="none"
+                              legendType="none"
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="averageDelta"
+                              stroke="#3cc8c9"
+                              name="Average Delta in Days"
+                              dot={false}
+                              strokeWidth={2}
+                              TooltipType="none"
+                              legendType="none"
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="riskEstimate"
+                              stroke="#a7768a"
+                              name="Risk Estimate"
+                              dot={false}
+                              strokeWidth={2}
+                              TooltipType="none"
+                              legendType="none"
+                            />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      )}
+                  </>
+                )}
+              </Box>
+            </>)}
         </Collapse>
       </CardContent>
     </Card>

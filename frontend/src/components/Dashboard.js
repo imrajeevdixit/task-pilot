@@ -1,59 +1,41 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { 
-  Box, Container, Grid, Paper, Typography, FormControl, 
+import {
+  Box, Container, Grid, Paper, Typography, FormControl,
   InputLabel, Select, MenuItem, OutlinedInput, Chip,
   CircularProgress, Alert, Button, ListItemText, List, ListItem, ListItemButton,
-  Checkbox
-} from '@mui/material';
-import { getDashboardData, getPerformanceTrends } from '../services/api';
+  Checkbox, TextField, AppBar, Toolbar, IconButton, Menu, Avatar,} from '@mui/material';
+import { getDashboardData, getPerformanceTrends, searchAssignees } from '../services/api';
 import MetricsCard from './MetricsCard';
-import AssigneeSelect from './AssigneeSelect';
 import ExpandableBarGraph from './ExpandableBarGraph';
 import TicketLifecycleMetrics from './TicketLifecycleMetrics';
+import { AccountCircle } from '@mui/icons-material';
 
 const timeRanges = [
-  { value: '7d', label: 'Last 7 Days' },
+  { value: '7d', label: 'Last Week' },
   { value: '1m', label: 'Last Month' },
   { value: '3m', label: 'Last 3 Months' },
   { value: '6m', label: 'Last 6 Months' },
   { value: 'all', label: 'All Time' }
 ];
 
-const ALL_PROJECTS = ['THC', 'TEC', 'TP', 'TWCP', 'TPO'];
+const ALL_PROJECTS = ['THC', 'TEC', 'TPC', 'TWCP', 'TPO', 'TEST'];
 
-export default function Dashboard() {
+export default function Dashboard({ handleLoginIn }) {
   const [timeRange, setTimeRange] = useState('1m');
   const [selectedProjects, setSelectedProjects] = useState(ALL_PROJECTS);
   const [tempSelectedProjects, setTempSelectedProjects] = useState(ALL_PROJECTS);
   const [selectedAssignees, setSelectedAssignees] = useState([]);
-  const [isProjectsOpen, setIsProjectsOpen] = useState(false);
+  const [assignees, setAssignees] = useState([])
+  const [assigneesData, setAssigneesData] = useState([])
+  const [performanceTrends, setPerformanceTrends] = useState({})
+  const [data, setData] = useState({})
   const [selectedEngineer, setSelectedEngineer] = useState(null);
-
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['dashboard', timeRange, selectedProjects, selectedAssignees],
-    queryFn: () => getDashboardData(
-      timeRange, 
-      selectedProjects.join(','),
-      selectedAssignees.map(a => a.accountId).join(',')
-    ),
-    enabled: true,
-  });
-
-  // Add performance trends query
-  const { data: performanceTrends } = useQuery({
-    queryKey: ['performanceTrends', timeRange, selectedProjects],
-    queryFn: () => getPerformanceTrends(timeRange, selectedProjects.join(',')),
-    enabled: !!selectedProjects.length
-  });
-
-  // Add debug logging
-  console.log('Dashboard Data:', {
-    hasData: !!data,
-    lifecycleTrends: data?.lifecycle_trends,
-    tickets: data?.tickets?.length,
-    metrics: data?.performance_metrics
-  });
+  const [anchorEl, setAnchorEl] = useState(null);
+  const [isLoading, setIsLoading] = useState(true)
+  const [isLoader, setIsLoader] = useState(false)
+  const [loader, setLoader] = useState(false)
+  const [isProjectsOpen, setIsProjectsOpen] = useState(false);
 
   const handleProjectChange = (event) => {
     const value = event.target.value;
@@ -71,7 +53,7 @@ export default function Dashboard() {
   const handleApplyProjects = () => {
     setSelectedProjects(tempSelectedProjects);
     setIsProjectsOpen(false);
-    refetch(); // Trigger the API call
+    getDashboardData(timeRange, tempSelectedProjects.join(','), selectedAssignees.join(','), selectedEngineer, setLoader, setData)
   };
 
   const handleProjectsClose = () => {
@@ -79,11 +61,30 @@ export default function Dashboard() {
     setIsProjectsOpen(false);
   };
 
-  const getVarianceText = (variance) => {
-    if (variance > 0) return `${Math.abs(variance)}% ahead`;
-    if (variance < 0) return `${Math.abs(variance)}% behind`;
-    return 'On schedule';
+  const handleMenuOpen = (event) => {
+    setAnchorEl(event.currentTarget);
   };
+
+  const handleLogout = () => {
+    localStorage.removeItem("loggedIn")
+    handleLoginIn(false)
+  }
+
+  useEffect(() => {
+    if (selectedEngineer || selectedAssignees.length > 0 || (selectedEngineer && timeRange !== "1m"))
+      getDashboardData(timeRange, selectedProjects.join(','), selectedAssignees.join(','), selectedEngineer, setLoader, setData)
+  }, [timeRange, selectedAssignees])
+
+  useEffect(() => {
+    searchAssignees('', selectedProjects.join(','), setIsLoading, (data) => {
+      setAssignees(data)
+      setAssigneesData(data)
+    })
+  }, [])
+
+  useEffect(() => {
+    getPerformanceTrends(timeRange, selectedProjects.join(','), setIsLoader, setPerformanceTrends)
+  }, [timeRange, selectedProjects])
 
   if (isLoading) return (
     <Box display="flex" justifyContent="center" alignItems="center" minHeight="100vh">
@@ -91,18 +92,42 @@ export default function Dashboard() {
     </Box>
   );
 
-  if (error) return (
-    <Container>
-      <Alert severity="error">Error: {error.message}</Alert>
-    </Container>
-  );
-
   return (
-    <Container maxWidth="xl" sx={{ py: 4 }}>
+    <Container maxWidth="xl" sx={{ paddingBottom: 4 }}>
       <Box sx={{ mb: 4 }}>
-        <Typography variant="h4" component="h1" gutterBottom>
+        {/* <Typography variant="h4" component="h1" gutterBottom>
           Engineering Productivity Dashboard
-        </Typography>
+        </Typography> */}
+        <AppBar position="static" sx={{ backgroundColor: "#1976d2", marginBottom: 3 }}>
+          <Toolbar sx={{ display: "flex", justifyContent: "space-between" }}>
+            {/* Left Side - Dashboard Title */}
+            <Typography variant="h6" sx={{ fontWeight: "bold" }}>
+              Engineering Productivity Dashboard
+            </Typography>
+
+            {/* Right Side - Profile Icon */}
+            <Box>
+              <IconButton onClick={handleMenuOpen} color="inherit">
+                <Avatar sx={{ bgcolor: "white", color: "#1976d2" }}>
+                  <AccountCircle />
+                </Avatar>
+              </IconButton>
+
+              {/* Dropdown Menu */}
+              <Menu
+                anchorEl={anchorEl}
+                open={Boolean(anchorEl)}
+                onClose={() => setAnchorEl(null)}
+                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                transformOrigin={{ vertical: "top", horizontal: "right" }}
+              >
+                <MenuItem onClick={() => { setAnchorEl(null); handleLogout(); }}>
+                  Logout
+                </MenuItem>
+              </Menu>
+            </Box>
+          </Toolbar>
+        </AppBar>
         <Box sx={{ display: 'flex', gap: 2, mb: 4, flexWrap: 'wrap' }}>
           <FormControl sx={{ minWidth: 200 }}>
             <InputLabel>Time Range</InputLabel>
@@ -150,7 +175,7 @@ export default function Dashboard() {
               }}
             >
               <MenuItem value="ALL">
-                <Checkbox 
+                <Checkbox
                   checked={tempSelectedProjects.length === ALL_PROJECTS.length}
                   indeterminate={tempSelectedProjects.length > 0 && tempSelectedProjects.length < ALL_PROJECTS.length}
                 />
@@ -166,20 +191,20 @@ export default function Dashboard() {
                 </MenuItem>
               ))}
               <Box sx={{ p: 2, display: 'flex', justifyContent: 'flex-end', borderTop: 1, borderColor: 'divider' }}>
-                <Button 
+                <Button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleProjectsClose();
-                  }} 
+                  }}
                   sx={{ mr: 1 }}
                 >
                   Cancel
                 </Button>
-                <Button 
+                <Button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleApplyProjects();
-                  }} 
+                  }}
                   variant="contained"
                 >
                   Apply
@@ -187,49 +212,58 @@ export default function Dashboard() {
               </Box>
             </Select>
           </FormControl>
-
-          <FormControl sx={{ minWidth: 300 }}>
-            <AssigneeSelect
-              selectedAssignees={selectedAssignees}
-              onAssigneesChange={setSelectedAssignees}
-              projects={selectedProjects}
-            />
-          </FormControl>
         </Box>
       </Box>
 
       <Grid container spacing={3}>
         {/* Team Performance Overview */}
         <Grid item xs={12}>
-          <ExpandableBarGraph performanceTrends={performanceTrends} />
+          <ExpandableBarGraph ALL_PROJECTS={selectedProjects} performanceTrends={performanceTrends} isLoader={isLoader} />
         </Grid>
 
         {/* Split View Section */}
         <Grid item xs={12}>
           <Paper sx={{ p: 0, display: 'flex', height: 800 }}>
             {/* Left Section - Engineer List */}
-            <Box sx={{ 
-              width: 300, 
-              borderRight: 1, 
+            <Box sx={{
+              width: 300,
+              borderRight: 1,
               borderColor: 'divider',
               overflow: 'auto'
             }}>
-              <Box sx={{ 
-                bgcolor: 'grey.100', 
-                borderBottom: 1, 
+              <Box sx={{
+                bgcolor: 'grey.100',
+                borderBottom: 1,
                 borderColor: 'divider',
                 px: 2,
                 py: 1.5
               }}>
                 <Typography variant="h6">Team Members</Typography>
               </Box>
+              <TextField
+                label="Search Team Member"
+                onChange={(e) => {
+                  if (e.target.value)
+                    setAssigneesData(assignees.filter((item) => item.displayName.toLowerCase().includes(e.target.value.toLowerCase())))
+                  else
+                    setAssigneesData(assignees)
+                }}
+                sx={{
+                  width: '280px'
+                }}
+              />
 
               <List sx={{ p: 0 }}>
-                {Object.entries(data?.engineers_data || {}).map(([engineer, metrics]) => (
-                  <ListItem key={engineer} disablePadding>
-                    <ListItemButton 
-                      selected={selectedEngineer === engineer}
-                      onClick={() => setSelectedEngineer(engineer)}
+                {assigneesData?.map((el, index) => (
+                  <ListItem key={index} disablePadding>
+                    <ListItemButton
+                      selected={selectedEngineer === el.displayName}
+                      onClick={() => {
+                        if (selectedEngineer !== el.displayName) {
+                          setSelectedEngineer(el.displayName)
+                          setSelectedAssignees([assignees.find((item) => item.displayName === el.displayName).accountId])
+                        }
+                      }}
                       sx={{
                         '&.Mui-selected': {
                           bgcolor: 'primary.light',
@@ -239,9 +273,8 @@ export default function Dashboard() {
                         },
                       }}
                     >
-                      <ListItemText 
-                        primary={engineer}
-                        secondary={getVarianceText(metrics.time_variance)}
+                      <ListItemText
+                        primary={el.displayName}
                       />
                     </ListItemButton>
                   </ListItem>
@@ -250,39 +283,48 @@ export default function Dashboard() {
             </Box>
 
             {/* Right Section - Metrics and Insights */}
-            <Box sx={{ 
+            <Box sx={{
               flex: 1,
               display: 'flex',
               flexDirection: 'column',
               overflow: 'hidden'
             }}>
               {selectedEngineer ? (
-                <>
+                loader ? (<Box display="flex" justifyContent="center" alignItems="center" minHeight="100vh">
+                  <CircularProgress />
+                </Box>) : (<>
                   <Typography variant="h5" sx={{ p: 2, pb: 1 }}>
                     {selectedEngineer}'s Performance Insights
                   </Typography>
                   <Box sx={{ flex: 1, overflow: 'auto', p: 2, pt: 1 }}>
-                    <MetricsCard 
-                      metrics={data?.engineers_data[selectedEngineer]} 
+                    <MetricsCard
+                      metrics={{
+                        ...data?.performance_metrics,
+                        time_variance: data?.engineers_data?.[selectedEngineer]?.time_variance,
+                        idle_time: data?.engineers_data?.[selectedEngineer]?.idle_time,
+                        total_logged: data?.engineers_data?.[selectedEngineer]?.total_logged,
+                        total_estimate: data?.engineers_data?.[selectedEngineer]?.total_estimate,
+                        total_working_hour: data?.engineers_data?.[selectedEngineer]?.total_working_hour,
+                        day: timeRange
+                      }}
                       expanded={true}
                     />
                     <Box sx={{ mt: 2 }}>
-                      <TicketLifecycleMetrics 
+                      <TicketLifecycleMetrics
                         tickets={data?.tickets || []}
                         performanceMetrics={data?.performance_metrics || {}}
                         lifecycleTrends={data?.lifecycle_trends}
                         selectedEngineer={selectedEngineer}
                         timeRange={timeRange}
-                        engineersData={data?.engineers_data || {}}
                       />
                     </Box>
                   </Box>
-                </>
+                </>)
               ) : (
-                <Box sx={{ 
-                  height: '100%', 
-                  display: 'flex', 
-                  alignItems: 'center', 
+                <Box sx={{
+                  height: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
                   justifyContent: 'center',
                   color: 'text.secondary'
                 }}>

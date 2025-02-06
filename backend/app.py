@@ -8,14 +8,26 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 
-# Enable CORS for all routes
+# Enable CORS for all routes with more permissive settings
 CORS(app, resources={
-r"/*": {
-        "origins": "http://localhost:3000",  # Allow all origins in development
-        "methods": ["GET", "POST", "OPTIONS"],  # Added POST
-        "allow_headers": ["Content-Type", "Accept", "Authorization", "Origin"]
+    r"/*": {
+        "origins": ["http://localhost:3000"],  # Specific origin for development
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Accept", "Authorization", "Origin", "X-Requested-With"],
+        "expose_headers": ["Content-Range", "X-Content-Range"],
+        "supports_credentials": True,
+        "send_wildcard": False,
+        "max_age": 86400  # Cache preflight requests for 24 hours
     }
 })
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
 
 # Basic Swagger config
 app.config['SWAGGER'] = {
@@ -29,39 +41,37 @@ app.config['SWAGGER'] = {
 swagger = Swagger(app)
 
 def connect_jira():
-    return JIRA(
-        server=JIRA_SERVER,
-        basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN)
-    )
+    try:
+        print(f"JIRA_SERVER: {JIRA_SERVER}, JIRA_EMAIL: {JIRA_EMAIL}, JIRA_API_TOKEN: {JIRA_API_TOKEN}")
+        return JIRA(
+            server=JIRA_SERVER,
+            basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN),
+            options={'verify': False}  # Only for development
+        )
 
-def calculate_idle_time(start_date, logged_time):
+    except Exception as e:
+        print(f"JIRA Connection Error: {str(e)}")
+        raise Exception(f"Failed to connect to JIRA: {str(e)}")
+
+def calculate_idle_time(start_date):
     if not start_date or start_date == '{}':
         return 0
     try:
         start = datetime.strptime(start_date, '%Y-%m-%d')
         today = datetime.now()
         
-        # Calculate working days
-        working_days = len(pd.bdate_range(start, today))
-        
-        # If start and today are the same, set working_days to 1
-        if working_days == 0 and start.date() == today.date():
-            working_days = 1
+        working_days = (len(pd.bdate_range(start=start, end=today, weekmask='Mon Tue Wed Thu Fri', freq='C')) - 1)
         
         total_available_hours = working_days * 8
-        idle_time = total_available_hours - float(logged_time or 0)
         
-        # Ensure idle time is not negative
-        return max(idle_time, 0)
+        return max(total_available_hours, 0)
     except (ValueError, TypeError):
         return 0
 
 def calculate_time_variance(logged_time, estimated_time):
     if not estimated_time:
         return 0
-    # Calculate variance as percentage difference from estimate
-    # Positive: Ahead of schedule (completed early)
-    # Negative: Behind schedule (took longer)
+    
     variance = ((estimated_time - logged_time) / estimated_time) * 100
     return round(variance, 2)
 
@@ -109,7 +119,7 @@ def calculate_ticket_durations(changelog, created_date):
         
     return durations
 
-def get_daily_metrics(issues, start_date, end_date):
+def get_daily_metrics(time_range, issues, start_date, end_date):
     """Calculate daily metrics for team performance"""
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')
     
@@ -142,6 +152,7 @@ def get_daily_metrics(issues, start_date, end_date):
             original_estimate = 0
 
         # Handle worklogs for actual time logged
+        totalLoggedTimeIssue = 0
         try:
             worklogs = issue.fields.worklog.worklogs
             if worklogs:
@@ -153,6 +164,7 @@ def get_daily_metrics(issues, start_date, end_date):
                         
                         # Update team metrics
                         daily_metrics[work_date_str]['logged_time'] += time_spent
+                        totalLoggedTimeIssue += time_spent
                         if original_estimate > 0 and len(worklogs) > 0:
                             daily_metrics[work_date_str]['estimated_time'] += original_estimate / len(worklogs)
                         
@@ -174,7 +186,6 @@ def get_daily_metrics(issues, start_date, end_date):
                             eng_metrics['estimated_time'] += original_estimate / len(worklogs)
         except (AttributeError, ValueError):
             continue
-
         # Calculate cycle time (In Progress to Done)
         try:
             if issue.fields.status.name in ['Done', 'Closed'] and issue.fields.resolutiondate:
@@ -196,20 +207,18 @@ def get_daily_metrics(issues, start_date, end_date):
                         start_date = change['date']
                     elif change['to_status'] in ['Done', 'Closed']:
                         end_date = change['date']
-
-                if start_date and end_date:
-                    cycle_time = (end_date - start_date).total_seconds() / 3600
-                    resolution_date_str = str(end_date.date())
-                    if resolution_date_str in daily_metrics:
-                        # Update team metrics
-                        daily_metrics[resolution_date_str]['cycle_time'] += cycle_time
-                        daily_metrics[resolution_date_str]['completed_tasks'] += 1
-                        
-                        # Update engineer metrics
-                        if assignee in daily_metrics[resolution_date_str]['engineers']:
-                            eng_metrics = daily_metrics[resolution_date_str]['engineers'][assignee]
-                            eng_metrics['cycle_time'] += cycle_time
-                            eng_metrics['completed_tasks'] += 1
+                
+                resolution_date_str = str(end_date.date())
+                if resolution_date_str in daily_metrics:
+                    # Update team metrics
+                    daily_metrics[resolution_date_str]['cycle_time'] += totalLoggedTimeIssue
+                    daily_metrics[resolution_date_str]['completed_tasks'] += 1
+                    
+                    # Update engineer metrics
+                    if assignee in daily_metrics[resolution_date_str]['engineers']:
+                        eng_metrics = daily_metrics[resolution_date_str]['engineers'][assignee]
+                        eng_metrics['cycle_time'] += totalLoggedTimeIssue
+                        eng_metrics['completed_tasks'] += 1
 
         except (AttributeError, ValueError):
             continue
@@ -404,9 +413,9 @@ def get_lifecycle_trends(issues, start_date, end_date):
 def search_assignees():
     try:
         jira = connect_jira()
-        search_term = request.args.get('search', '')
+        search_term = request.args.get('search', '').lower()  # Precompute lowercase search term
         projects = request.args.get('projects', '').split(',')
-        
+
         # Build JQL query
         jql_parts = []
         if projects and projects[0]:
@@ -414,11 +423,11 @@ def search_assignees():
             jql_parts.append(f'project in ({projects_str})')
         
         jql_query = ' AND '.join(jql_parts) if jql_parts else ''
-        
+
         # Get unique assignees from issues
         assignees = set()
         start_at = 0
-        max_results = 500
+        max_results = 100
         
         while True:
             issues = jira.search_issues(
@@ -430,10 +439,8 @@ def search_assignees():
             
             if not issues:
                 break
-                
-            for issue in issues:
-                if issue.fields.assignee:
-                    assignees.add(issue.fields.assignee)
+
+            assignees.update(issue.fields.assignee for issue in issues if issue.fields.assignee)
                     
             if len(issues) < max_results:
                 break
@@ -449,7 +456,7 @@ def search_assignees():
                 'active': True
             }
             for a in assignees
-            if not search_term or search_term.lower() in a.displayName.lower()
+            if not search_term or search_term in a.displayName.lower()  # Use precomputed lowercase search term
         ]
         
         # Sort by display name
@@ -1081,33 +1088,42 @@ def get_work_logs():
             
         jql_query = ' AND '.join(jql_parts)
         
-        # Get issues with comments
-        issues = jira.search_issues(jql_query, maxResults=1000, expand='changelog,comments')
+        all_issues = []
+        start_at = 0
+        max_results = 100
+
+        while True:
+            # Get issues with worklog
+            issues = jira.search_issues(
+                jql_query,
+                startAt=start_at,
+                maxResults=max_results,
+                expand='worklog'
+            )
+
+            # Add current page of results to the list
+            all_issues.extend(issues)
+
+            # Check if we've fetched all results
+            if len(issues) < max_results:
+                break
+
+            # Move to the next page
+            start_at += max_results
         
-        # Process work logs
-        work_logs = []
-        for issue in issues:
-            if hasattr(issue.fields, 'comment') and issue.fields.comment:
-                for comment in issue.fields.comment.comments:
-                    comment_date = datetime.strptime(comment.created, '%Y-%m-%dT%H:%M:%S.%f%z')
-                    
-                    if '[work:' in comment.body.lower():
-                        if assignee and comment.author.displayName != assignee:
-                            continue
-                            
-                        hours = extract_hours_from_comment(comment.body)
-                        if hours > 0:
-                            work_log = {
-                                'ticket_key': issue.key,
-                                'summary': issue.fields.summary,
-                                'hours': hours,
-                                'comment': comment.body,
-                                'date': comment_date.isoformat(),
-                                'author': comment.author.displayName,
-                                'assignee': issue.fields.assignee.displayName if issue.fields.assignee else None,
-                                'status': issue.fields.status.name
-                            }
-                            work_logs.append(work_log)
+        # Process work logs                
+        work_logs = [
+            {
+                'ticket_key': issue.key,
+                'summary': issue.fields.summary,
+                'hours': worklog.timeSpentSeconds / 3600,  # Convert seconds to hours
+                'date': datetime.strptime(worklog.created, '%Y-%m-%dT%H:%M:%S.%f%z').isoformat(),
+                'author': worklog.author.displayName,
+                'assignee': issue.fields.assignee.displayName if issue.fields.assignee else None,
+                'status': issue.fields.status.name
+            }
+            for issue in all_issues for worklog in issue.fields.worklog.worklogs
+        ]
         
         # Group work logs by date
         daily_work = {}
@@ -1192,6 +1208,7 @@ def get_dashboard_data():
         time_range = request.args.get('time_range', '1m')
         projects = request.args.get('projects', '').split(',')
         assignees = request.args.get('assignees', '').split(',')
+        engineer_name = request.args.get('engineer_name', '')
         
         # Calculate date range based on time_range
         end_date = datetime.now()
@@ -1211,18 +1228,44 @@ def get_dashboard_data():
             
         if assignees and assignees[0]:
             jql_parts.append(f'assignee in ({",".join(assignees)})')
-            
-        jql_parts.append(f'updated >= "{start_date.strftime("%Y-%m-%d")}"')
+        
+        jql_parts.append(f'created >= "{start_date.strftime("%Y-%m-%d")}"')
         jql_query = ' AND '.join(jql_parts)
         
-        # Fetch issues with all required data
-        issues = jira.search_issues(
-            jql_query,
-            maxResults=1000,
-            expand='changelog,worklog'
-        )
-        
+        all_issues = []
+        start_at = 0
+        max_results = 100
+
+        while True:
+            issues = jira.search_issues(
+                jql_query,
+                startAt=start_at,
+                maxResults=max_results,
+                expand='changelog,worklog'
+            )
+
+            # Add current page of results to the list
+            all_issues.extend(issues)
+
+            # Check if we've fetched all results
+            if len(issues) < max_results:
+                break
+
+            # Move to the next page
+            start_at += max_results
+
         # Initialize data structures
+        default_engineer_data = {
+            engineer_name: {
+                "total_working_hour": 0,
+                "idle_time": calculate_idle_time(start_date.strftime("%Y-%m-%d")),
+                "time_variance": 0,
+                "total_estimate": 0,
+                "total_logged": 0,
+                "tickets": []
+            }
+        }
+
         engineers_data = {}
         tickets = []
         performance_metrics = {
@@ -1231,9 +1274,9 @@ def get_dashboard_data():
             'completed_tickets': 0,
             'in_progress_tickets': 0
         }
-        
+
         # Process each issue
-        for issue in issues:
+        for issue in all_issues:
             # Extract ticket data
             ticket = {
                 'key': issue.key,
@@ -1242,8 +1285,11 @@ def get_dashboard_data():
                 'assignee': issue.fields.assignee.displayName if issue.fields.assignee else None,
                 'created': issue.fields.created,
                 'updated': issue.fields.updated,
-                'estimate': 0,  # Initialize with 0
-                'logged': 0     # Initialize with 0
+                'estimate': 0,
+                'logged': 0,
+                'issue_type': issue.fields.issuetype.name,
+                'due_date': issue.fields.duedate if issue.fields.duedate else None,
+                'completion_date': None
             }
             
             # Safely get estimate
@@ -1252,6 +1298,13 @@ def get_dashboard_data():
                     ticket['estimate'] = issue.fields.timeoriginalestimate / 3600
             except (AttributeError, TypeError):
                 pass
+            
+            if issue.fields.status.name in ['Done', 'Closed'] and issue.fields.resolutiondate:
+                status_changes = []
+                for history in issue.changelog.histories:
+                    for item in history.items:
+                        if item.field == 'status' and item.toString in ['Done', 'Closed']:
+                            ticket['completion_date'] = datetime.strptime(history.created, '%Y-%m-%dT%H:%M:%S.%f%z').strftime("%Y-%m-%d")
 
             # Safely get logged time
             try:
@@ -1266,6 +1319,7 @@ def get_dashboard_data():
             # Calculate durations
             durations = calculate_ticket_durations(issue.changelog, issue.fields.created)
             ticket.update(durations)
+            ticket['time_variance'] = calculate_time_variance(ticket['logged'], ticket['estimate'])
             
             tickets.append(ticket)
             
@@ -1276,50 +1330,24 @@ def get_dashboard_data():
                         'total_estimate': 0,
                         'total_logged': 0,
                         'idle_time': 0,
-                        'current_work': 0,
-                        'projects': {},
+                        'total_working_hour': 0,
                         'time_variance': 0,
-                        'tickets': [],
-                        'performance_metrics': {
-                            'avg_time_to_start': 0,
-                            'avg_time_to_complete': 0,
-                            'completed_tickets': 0,
-                            'in_progress_tickets': 0
-                        }
+                        'tickets': []
                     }
                 
                 eng_data = engineers_data[ticket['assignee']]
                 eng_data['total_estimate'] += ticket['estimate']
                 eng_data['total_logged'] += ticket['logged']
+                eng_data['time_variance'] = calculate_time_variance(eng_data['total_logged'], eng_data['total_estimate'])
+                eng_data['total_working_hour'] = calculate_idle_time(start_date.strftime("%Y-%m-%d"))
+                eng_data['idle_time'] = calculate_idle_time(start_date.strftime("%Y-%m-%d")) - eng_data['total_estimate']
                 eng_data['tickets'].append(ticket)
-                
-                # Update project-specific data
-                project = ticket['key'].split('-')[0]
-                if project not in eng_data['projects']:
-                    eng_data['projects'][project] = {
-                        'total_estimate': 0,
-                        'total_logged': 0,
-                        'ticket_count': 0,
-                        'completed_count': 0,
-                        'active_count': 0,
-                        'bandwidth': 0
-                    }
-                
-                proj_data = eng_data['projects'][project]
-                proj_data['total_estimate'] += ticket['estimate']
-                proj_data['total_logged'] += ticket['logged']
-                proj_data['ticket_count'] += 1
-                
-                if ticket['status'] in ['Done', 'Closed']:
-                    proj_data['completed_count'] += 1
-                else:
-                    proj_data['active_count'] += 1
         
         # Calculate daily metrics and lifecycle trends
-        daily_metrics = get_daily_metrics(issues, start_date, end_date)
+        daily_metrics = get_daily_metrics(time_range, issues, start_date, end_date)
         lifecycle_trends = {
             'daily_trends': daily_metrics['team'],
-            'engineer_trends': daily_metrics['engineers']
+            # 'engineer_trends': daily_metrics['engineers']
         }
         
         # Calculate performance metrics
@@ -1330,6 +1358,9 @@ def get_dashboard_data():
                 'completed_tickets': sum(1 for t in tickets if t['status'] in ['Done', 'Closed']),
                 'in_progress_tickets': sum(1 for t in tickets if t['status'] not in ['Done', 'Closed'])
             })
+            
+        if not engineers_data:
+            engineers_data = default_engineer_data
         
         return jsonify({
             'engineers_data': engineers_data,
@@ -1433,13 +1464,15 @@ def get_performance_trends():
 
         # Calculate date range
         end_date = datetime.now()
-        start_date = end_date - {
+        time_deltas = {
             '7d': timedelta(days=7),
             '1m': timedelta(days=30),
             '3m': timedelta(days=90),
             '6m': timedelta(days=180),
             'all': timedelta(days=365)
-        }.get(time_range, timedelta(days=30))
+        }
+        start_date = end_date - time_deltas.get(time_range, timedelta(days=30))
+        aggregate_by_week = time_range in ['1m', '3m', '6m', 'all']
 
         # Build JQL query
         jql_parts = []
@@ -1450,143 +1483,212 @@ def get_performance_trends():
         jql_parts.append(f'updated >= "{start_date.strftime("%Y-%m-%d")}"')
         jql_query = ' AND '.join(jql_parts)
 
-        # Fetch issues
-        issues = jira.search_issues(
-            jql_query,
-            maxResults=1000,
-            expand='changelog,worklog'
-        )
+        # Fetch all issues
+        all_issues = []
+        start_at = 0
+        max_results = 100
+        while True:
+            issues = jira.search_issues(
+                jql_query,
+                startAt=start_at,
+                maxResults=max_results,
+                expand='changelog,worklog',
+                fields=['project', 'assignee', 'timeoriginalestimate', 'status', 'worklog', 'issuetype', 'resolutiondate', 'duedate']
+            )
+            all_issues.extend(issues)
+            if len(issues) < max_results:
+                break
+            start_at += max_results
 
-        # Calculate working days in the period
-        total_days = (end_date - start_date).days
-        working_days = sum(1 for d in (start_date + timedelta(days=x) for x in range(total_days))
-                          if d.weekday() < 5)  # Excluding weekends
-        
+        # Helper function to get time key
+        def get_time_key(work_date):
+            return f"Week{((work_date - start_date).days // 7) + 1}" if aggregate_by_week else work_date.strftime('%Y-%m-%d')
+
         # Initialize data structures
-        resources_data = {}
-        daily_metrics = {}
+        data_metrics = {}
         total_resources = set()
-        daily_deviations = {}  # Track deviations for each day
+        current_date = start_date
+        while current_date <= end_date:
+            time_key = get_time_key(current_date)
+            if time_key not in data_metrics:
+                data_metrics[time_key] = {}
+            current_date += timedelta(days=1)
 
-        for issue in issues:
-            assignee = issue.fields.assignee.displayName if issue.fields.assignee else "Unassigned"
+        # Process issues
+        for issue in all_issues:
+            fields = issue.fields
+            project = fields.project.key
+            assignee = fields.assignee.displayName if fields.assignee else "Unassigned"
             total_resources.add(assignee)
-            
-            # Get estimate in hours
-            estimate = (issue.fields.timeoriginalestimate or 0) / 3600
-            
-            # Calculate logged time per day
-            if hasattr(issue.fields, 'worklog') and issue.fields.worklog:
-                for worklog in issue.fields.worklog.worklogs:
+            estimate = (fields.timeoriginalestimate or 0) / 3600
+
+            if hasattr(fields, 'worklog') and fields.worklog:
+                for worklog in fields.worklog.worklogs:
                     work_date = datetime.strptime(worklog.started[:10], '%Y-%m-%d')
                     if start_date <= work_date <= end_date:
-                        date_str = work_date.strftime('%Y-%m-%d')
+                        time_key = get_time_key(work_date)
                         logged_hours = worklog.timeSpentSeconds / 3600
-                        
-                        # Initialize daily metrics and deviations
-                        if date_str not in daily_metrics:
-                            daily_metrics[date_str] = {
+
+                        # Initialize time period and project entry
+                        if project not in data_metrics[time_key]:
+                            data_metrics[time_key][project] = {
                                 'total_logged': 0,
                                 'total_estimate': 0,
                                 'active_resources': set(),
-                                'deviations': [],  # Store individual task deviations
+                                'deviations': [],
                                 'std_deviation': 0,
                                 'mean_deviation': 0,
-                                'total_resources_count': len(total_resources),  # Add total resources count
-                                'resource_hours': {}  # Track hours per resource
+                                'resource_hours': {}
                             }
-                            daily_deviations[date_str] = []
-                        
-                        # Initialize resource tracking if not exists
-                        if assignee not in daily_metrics[date_str]['resource_hours']:
-                            daily_metrics[date_str]['resource_hours'][assignee] = {
-                                'active_hours': 0,  # Hours from In Progress tasks
-                                'total_hours': 8,   # Total available hours per day
-                                'idle_hours': 8     # Initialize with full day as idle
-                            }
-                        
-                        # Update active hours only if task is In Progress
-                        if issue.fields.status.name == 'In Progress':
-                            resource_hours = daily_metrics[date_str]['resource_hours'][assignee]
+
+                        # Initialize resource tracking
+                        resource_hours = data_metrics[time_key][project]['resource_hours'].setdefault(assignee, {
+                            'active_hours': 0,
+                            'total_hours': 8,
+                            'idle_hours': 8
+                        })
+
+                        # Update active hours if task is in progress
+                        if fields.status.name == 'In Progress':
                             resource_hours['active_hours'] += logged_hours
                             resource_hours['idle_hours'] = max(0, resource_hours['total_hours'] - resource_hours['active_hours'])
-                            daily_metrics[date_str]['active_resources'].add(assignee)
-                        
-                        daily_metrics[date_str]['total_logged'] += logged_hours
-                        daily_metrics[date_str]['total_estimate'] += estimate
-                        
-                        # Calculate and store deviation for this task
-                        if estimate > 0:  # Only consider tasks with estimates
+                            data_metrics[time_key][project]['active_resources'].add(assignee)
+
+                        data_metrics[time_key][project]['total_logged'] += logged_hours
+                        data_metrics[time_key][project]['total_estimate'] += estimate
+
+                        # Deviation calculation
+                        if estimate > 0:
                             deviation_percentage = ((logged_hours - estimate) / estimate) * 100
-                            daily_metrics[date_str]['deviations'].append(deviation_percentage)
-                        else:
-                            # If no estimate, consider it a 100% deviation if there are logged hours
-                            if logged_hours > 0:
-                                daily_metrics[date_str]['deviations'].append(100)
+                            data_metrics[time_key][project]['deviations'].append(deviation_percentage)
+                        elif logged_hours > 0:
+                            data_metrics[time_key][project]['deviations'].append(100)
 
-        # Calculate metrics
-        total_resources_count = len(total_resources)
-        total_available_hours = working_days * 8 * total_resources_count
-        total_logged_hours = sum(day['total_logged'] for day in daily_metrics.values())
-        total_estimated_hours = sum(day['total_estimate'] for day in daily_metrics.values())
-        all_deviations = []  # Store all deviations for overall statistics
+        # Process statistical measures
+        total_logged_hours = 0
+        total_estimated_hours = 0
+        all_deviations = []
+        num_resources = len(total_resources)
+        date_range_days = (end_date - start_date).days
 
-        # Calculate daily averages, idle resources, and statistical measures
-        for date, metrics in daily_metrics.items():
-            active_count = len(metrics['active_resources'])
-            
-            # Calculate average active and idle hours across all resources
-            total_active_hours = sum(r['active_hours'] for r in metrics['resource_hours'].values())
-            total_idle_hours = sum(r['idle_hours'] for r in metrics['resource_hours'].values())
-            
-            metrics['avg_active_hours'] = total_active_hours / total_resources_count if total_resources_count > 0 else 0
-            metrics['avg_idle_hours'] = total_idle_hours / total_resources_count if total_resources_count > 0 else 0
-            metrics['idle_resources'] = total_resources_count - active_count
-            metrics['avg_hours_per_resource'] = metrics['total_logged'] / total_resources_count if total_resources_count > 0 else 0
-            
-            # Convert set to list for JSON serialization
-            metrics['active_resources'] = list(metrics['active_resources'])
-            
-            # Calculate statistical measures if we have deviations
-            deviations = metrics['deviations']
-            if deviations:
-                mean_deviation = sum(deviations) / len(deviations)
-                metrics['mean_deviation'] = mean_deviation
-                
-                squared_diff_sum = sum((x - mean_deviation) ** 2 for x in deviations)
-                metrics['std_deviation'] = (squared_diff_sum / len(deviations)) ** 0.5
-                
-                all_deviations.extend(deviations)
-            
-            # Remove raw data from response
-            metrics.pop('deviations', None)
-            metrics.pop('resource_hours', None)  # Remove detailed resource hours from response
+        for time_key, projects in data_metrics.items():
+            for project, metrics in projects.items():
+                active_count = len(metrics['active_resources'])
 
-        # Calculate overall statistics
+                total_active_hours = sum(r['active_hours'] for r in metrics['resource_hours'].values())
+                total_idle_hours = sum(r['idle_hours'] for r in metrics['resource_hours'].values())
+
+                metrics['avg_active_hours'] = total_active_hours / num_resources if num_resources else 0
+                metrics['avg_idle_hours'] = total_idle_hours / num_resources if num_resources else 0
+                metrics['idle_resources'] = num_resources - active_count
+                metrics['avg_hours_per_resource'] = metrics['total_logged'] / num_resources if num_resources else 0
+                metrics['active_resources'] = list(metrics['active_resources'])
+
+                deviations = metrics['deviations']
+                if deviations:
+                    mean_deviation = sum(deviations) / len(deviations)
+                    metrics['mean_deviation'] = mean_deviation
+                    metrics['std_deviation'] = (sum((x - mean_deviation) ** 2 for x in deviations) / len(deviations)) ** 0.5
+                    all_deviations.extend(deviations)
+
+                metrics.pop('deviations', None)
+                metrics.pop('resource_hours', None)
+
+                total_logged_hours += metrics['total_logged']
+                total_estimated_hours += metrics['total_estimate']
+
         overall_mean_deviation = sum(all_deviations) / len(all_deviations) if all_deviations else 0
-        squared_diff_sum = sum((x - overall_mean_deviation) ** 2 for x in all_deviations) if all_deviations else 0
-        overall_std_deviation = (squared_diff_sum / len(all_deviations)) ** 0.5 if all_deviations else 0
+        overall_std_deviation = (sum((x - overall_mean_deviation) ** 2 for x in all_deviations) / len(all_deviations)) ** 0.5 if all_deviations else 0
+
+        # Epic-wise distribution
+        epic_metrics = {}
+        for issue in all_issues:
+            if issue.fields.issuetype.name == 'Epic':
+                epic_key = issue.key
+                epic_metrics[epic_key] = {
+                    'total_tasks': 0,
+                    'todo': 0,
+                    'in_progress': 0,
+                    'done': 0,
+                    'closed': 0,
+                    'breached_tasks': 0,
+                    'total_delay_days': 0,
+                    'tasks': []
+                }
+
+                # Fetch tasks under the epic
+                epic_tasks = jira.search_issues(f'parent = {epic_key}', fields=['status', 'duedate'])
+                for task in epic_tasks:
+                    task_fields = task.fields
+                    epic_metrics[epic_key]['total_tasks'] += 1
+                    status = task_fields.status.name
+
+                    if status == 'To Do':
+                        epic_metrics[epic_key]['todo'] += 1
+                    # elif status == 'In Progress':
+                    elif status in ['In Progress', 'In Review', 'Ready for QA', 'In QA']:
+                        epic_metrics[epic_key]['in_progress'] += 1
+                    elif status == 'Done':
+                        epic_metrics[epic_key]['done'] += 1
+                    elif status == 'Closed':
+                        epic_metrics[epic_key]['closed'] += 1
+
+                    # Check for breached tasks
+                    if task_fields.duedate:
+                        due_date = datetime.strptime(task_fields.duedate, '%Y-%m-%d')
+                        if status in ['To Do', 'In Progress'] and due_date < datetime.now():
+                            delay_days = (datetime.now() - due_date).days
+                            epic_metrics[epic_key]['breached_tasks'] += 1
+                            epic_metrics[epic_key]['total_delay_days'] += delay_days
+                            epic_metrics[epic_key]['tasks'].append({
+                                'key': task.key,
+                                'status': status,
+                                'delay_days': delay_days
+                            })
+
+                # Calculate overall progress percentage
+                total_tasks = epic_metrics[epic_key]['total_tasks']
+                if total_tasks > 0:
+                    epic_metrics[epic_key]['progress_percentage'] = (
+                        (epic_metrics[epic_key]['done'] + epic_metrics[epic_key]['closed']) / total_tasks * 100
+                    )
+                else:
+                    epic_metrics[epic_key]['progress_percentage'] = 0
+
+                # Calculate average delay days
+                breached_tasks = epic_metrics[epic_key]['breached_tasks']
+                
+                if breached_tasks > 0:
+                    epic_metrics[epic_key]['avg_delay_days'] = epic_metrics[epic_key]['total_delay_days'] / breached_tasks
+                else:
+                    epic_metrics[epic_key]['avg_delay_days'] = 0
+
+                # Risk estimate based on average delay
+                avg_delay = epic_metrics[epic_key]['avg_delay_days']
+                if avg_delay > 10:
+                    epic_metrics[epic_key]['risk_estimate'] = 'High'
+                elif 5 < avg_delay <= 10:
+                    epic_metrics[epic_key]['risk_estimate'] = 'Medium'
+                else:
+                    epic_metrics[epic_key]['risk_estimate'] = 'Low'
 
         return jsonify({
             'trends': {
-                'daily_metrics': daily_metrics,
+                'daily_metrics': data_metrics,
                 'summary': {
-                    'total_resources': total_resources_count,
-                    'total_working_days': working_days,
-                    'total_available_hours': total_available_hours,
+                    'total_resources': num_resources,
                     'total_logged_hours': total_logged_hours,
                     'total_estimated_hours': total_estimated_hours,
                     'mean_deviation': overall_mean_deviation,
                     'std_deviation': overall_std_deviation,
-                    'resource_utilization': (total_logged_hours / total_available_hours * 100) if total_available_hours > 0 else 0,
-                    'avg_daily_hours_per_resource': total_logged_hours / (total_resources_count * working_days) if total_resources_count * working_days > 0 else 0
+                    'resource_utilization': (total_logged_hours / (8 * num_resources * date_range_days) * 100) if num_resources else 0,
+                    'avg_daily_hours_per_resource': total_logged_hours / (num_resources * date_range_days) if num_resources else 0
                 }
-            }
+            },
+            'epic_metrics': epic_metrics
         })
-
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
-
 if __name__ == '__main__':
-    app.run(host='localhost', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)

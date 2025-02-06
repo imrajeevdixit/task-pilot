@@ -1,161 +1,154 @@
+import { Api } from '@mui/icons-material';
 import axios from 'axios';
 
-const API_BASE_URL = process.env.FLASK_APP_URL || 'http://127.0.0.1:5000';
-
-// Helper function to handle API responses
-const handleResponse = async (response) => {
-  if (!response.ok) {
-    throw new Error('API request failed');
+// Create axios instance with default config
+const api = axios.create({
+  baseURL: 'http://127.0.0.1:5000',
+  withCredentials: true,
+  headers: {
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
   }
-  return response.json();
-};
+});
 
-export const getDashboardData = async (timeRange, projects, assignees) => {
-  const params = new URLSearchParams({
-    time_range: timeRange,
-    projects: projects,
-    assignees: assignees
-  });
-
-  const response = await fetch(`${API_BASE_URL}/api/dashboard?${params}`);
-  if (!response.ok) {
-    throw new Error('Failed to fetch dashboard data');
-  }
-  
-  const data = await response.json();
-  
-  // Add debug logging
-  console.log('API Response:', {
-    hasLifecycleTrends: !!data.lifecycle_trends,
-    trendsSample: data.lifecycle_trends,
-    ticketsCount: data.tickets?.length
-  });
-
-  return {
-    engineers_data: data.engineers_data,
-    daily_metrics: data.daily_metrics,
-    lifecycle_trends: data.lifecycle_trends,
-    tickets: data.tickets,
-    performance_metrics: data.performance_metrics
-  };
-};
-
-export const searchAssignees = async (searchTerm = '', projects = '') => {
-  try {
-    const response = await axios.get(`${API_BASE_URL}/api/assignees`, {
-      params: {
-        search: searchTerm,
-        projects: projects
-      }
-    });
-    return response.data.assignees;
-  } catch (error) {
-    console.error('API Error:', error);
+// Add response interceptor for error handling
+api.interceptors.response.use(
+  (response) => response.data,
+  (error) => {
+    console.error('API Error:', error.response?.data || error.message);
     throw error;
+  }
+);
+
+export const getDashboardData = async (timeRange, projects, assignees, selectedEngineer, setLoader, setData) => {
+  try {
+    setLoader(true);
+    const params = {
+      time_range: timeRange,
+      projects: projects,
+      assignees: assignees,
+      engineer_name: selectedEngineer
+    };
+
+    const data = await api.get('/api/dashboard', { params });
+    setData({
+      engineers_data: data.engineers_data,
+      daily_metrics: data.daily_metrics,
+      lifecycle_trends: data.lifecycle_trends,
+      tickets: data.tickets,
+      performance_metrics: data.performance_metrics
+    });
+  } catch (error) {
+    console.error('Dashboard Data Error:', error);
+  } finally {
+    setLoader(false);
+  }
+};
+
+export const searchAssignees = async (searchTerm = '', projects = '', setIsLoading, setAssignees) => {
+  try {
+    setIsLoading(true);
+    const params = {
+      search: searchTerm,
+      projects: projects
+    };
+    const response = await api.get('/api/assignees', { params });
+    setAssignees(response.assignees);
+  } catch (error) {
+    console.error('Search Assignees Error:', error);
+  } finally {
+    setIsLoading(false);
   }
 };
 
 export const createTicket = async (ticketData) => {
   try {
-    const response = await axios.post(`${API_BASE_URL}/api/tickets`, ticketData, {
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      }
-    });
-    return response.data;
+    const response = await api.post('/api/tickets', ticketData);
+    return response;
   } catch (error) {
-    console.error('API Error:', error);
+    console.error('Create Ticket Error:', error);
     throw error;
   }
 };
 
 export const createBulkTickets = async (tickets) => {
   try {
-    const response = await axios.post(`${API_BASE_URL}/api/tickets/bulk`, { tickets }, {
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      }
-    });
-    return response.data;
+    const response = await api.post('/api/tickets/bulk', { tickets });
+    return response;
   } catch (error) {
-    console.error('API Error:', error);
+    console.error('Create Bulk Tickets Error:', error);
     throw error;
   }
 };
 
 export const logWorkHours = async (ticketKey, hours, comment, date = null) => {
-  const response = await fetch(`${API_BASE_URL}/api/log-work`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+  try {
+    const response = await api.post('/api/log-work', {
       ticketKey,
       hours,
       comment,
       date
-    }),
-  });
-  
-  if (!response.ok) {
-    throw new Error('Failed to log work');
+    });
+    return response;
+  } catch (error) {
+    console.error('Log Work Hours Error:', error);
+    throw error;
   }
-  
-  return response.json();
 };
 
 export const getWorkLogs = async (options = {}) => {
-  const {
-    ticketKeys = [],
-    assignee = null,
-    startDate = null,
-    endDate = null
-  } = options;
-  
-  const params = new URLSearchParams();
-  
-  if (ticketKeys.length > 0) {
-    params.append('ticket_keys', ticketKeys.join(','));
-  }
-  
-  if (assignee) {
-    params.append('assignee', assignee);
-  }
-  
-  if (startDate) {
-    params.append('start_date', startDate);
-  }
-  
-  if (endDate) {
-    params.append('end_date', endDate);
-  }
+  try {
+    const {
+      ticketKeys = [],
+      assignee = null,
+      startDate = null,
+      endDate = null
+    } = options;
+    
+    const params = {
+      ticket_keys: ticketKeys.length > 0 ? ticketKeys.join(',') : undefined,
+      assignee,
+      start_date: startDate,
+      end_date: endDate
+    };
 
-  const response = await fetch(`${API_BASE_URL}/api/work-logs?${params}`);
-  if (!response.ok) {
-    throw new Error('Failed to fetch work logs');
+    const response = await api.get('/api/work-logs', { params });
+    return response;
+  } catch (error) {
+    console.error('Get Work Logs Error:', error);
+    throw error;
   }
-  
-  return response.json();
 };
 
 export const getProjectDistribution = async (assignee, projects) => {
-  const params = new URLSearchParams({
-    ...(assignee && { assignee }),
-    projects: projects.join(',')
-  });
-  
-  const response = await fetch(`${API_BASE_URL}/api/projects/distribution?${params}`);
-  return handleResponse(response);
+  try {
+    const params = {
+      ...(assignee && { assignee }),
+      projects: projects.join(',')
+    };
+    
+    const response = await api.get('/api/projects/distribution', { params });
+    return response;
+  } catch (error) {
+    console.error('Get Project Distribution Error:', error);
+    throw error;
+  }
 };
 
-export const getPerformanceTrends = async (timeRange, projects) => {
-  const params = new URLSearchParams({
-    time_range: timeRange,
-    projects: projects
-  });
-  
-  const response = await fetch(`${API_BASE_URL}/api/performance/trends?${params}`);
-  return handleResponse(response);
-}; 
+export const getPerformanceTrends = async (timeRange, projects, setIsLoader, setPerformanceTrends) => {
+  try {
+    setIsLoader(true);
+    const params = {
+      time_range: timeRange,
+      projects: projects
+    };
+    
+    const response = await api.get('/api/performance/trends', { params });
+    setPerformanceTrends(response);
+  } catch (error) {
+    console.error('Get Performance Trends Error:', error);
+    throw error;
+  } finally {
+    setIsLoader(false);
+  }
+};

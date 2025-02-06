@@ -1,27 +1,27 @@
 import {
-    Box,
-    Button,
-    Card,
-    CardContent,
-    CircularProgress,
-    Grid,
-    LinearProgress,
-    Link,
-    Paper,
-    Tab,
-    Table,
-    TableBody,
-    TableCell,
-    TableContainer,
-    TableHead,
-    TableRow,
-    Tabs,
-    ToggleButton,
-    ToggleButtonGroup,
-    Tooltip,
-    Typography
+  Box,
+  Button,
+  Card,
+  CardContent,
+  CircularProgress,
+  Grid,
+  LinearProgress,
+  Link,
+  Paper,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Tabs,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography
 } from '@mui/material';
-import React, { useEffect, useState } from 'react';
+import React, { memo, useEffect, useMemo, useState } from 'react';
 import { Area, AreaChart, CartesianGrid, Legend, Line, LineChart, Tooltip as RechartsTooltip, ResponsiveContainer, XAxis, YAxis } from 'recharts';
 import { getWorkLogs } from '../services/api';
 import ProjectDistributionChart from './ProjectDistributionChart';
@@ -29,33 +29,12 @@ import WorkLogDialog from './WorkLogDialog';
 
 const JIRA_BASE_URL = 'https://truworth.atlassian.net/browse';
 
-function TabPanel(props) {
-  const { children, value, index, ...other } = props;
-
-  return (
-    <div
-      role="tabpanel"
-      hidden={value !== index}
-      id={`metrics-tabpanel-${index}`}
-      aria-labelledby={`metrics-tab-${index}`}
-      {...other}
-    >
-      {value === index && (
-        <Box sx={{ p: 3 }}>
-          {children}
-        </Box>
-      )}
-    </div>
-  );
-}
-
-export default function TicketLifecycleMetrics({ 
-  tickets = [], 
-  performanceMetrics = {}, 
-  lifecycleTrends, 
+export default function TicketLifecycleMetrics({
+  tickets = [],
+  performanceMetrics = {},
+  lifecycleTrends,
   selectedEngineer,
-  timeRange,
-  engineersData = {}
+  timeRange
 }) {
   const [selectedTab, setSelectedTab] = useState(0);
   const [selectedMetric, setSelectedMetric] = useState('completion');
@@ -72,8 +51,8 @@ export default function TicketLifecycleMetrics({
   const getDateRange = React.useMemo(() => {
     const end = new Date();
     const start = new Date();
-    
-    switch(timeRange) {
+
+    switch (timeRange) {
       case '7d':
         start.setDate(end.getDate() - 7);
         break;
@@ -92,10 +71,10 @@ export default function TicketLifecycleMetrics({
       default:
         start.setDate(end.getDate() - 30);
     }
-    
+
     start.setHours(0, 0, 0, 0);
     end.setHours(23, 59, 59, 999);
-    
+
     return { start, end };
   }, [timeRange]);
 
@@ -105,7 +84,7 @@ export default function TicketLifecycleMetrics({
       const ticketDate = new Date(ticket.created);
       return ticketDate >= getDateRange.start && ticketDate <= getDateRange.end;
     });
-  }, [tickets, getDateRange]);
+  }, [tickets]);
 
   // Fetch work logs when date range or filtered tickets change
   useEffect(() => {
@@ -127,161 +106,62 @@ export default function TicketLifecycleMetrics({
         setIsLoadingWorkLogs(false);
       }
     };
-
-    fetchWorkLogs();
-  }, [dateFilteredTickets, getDateRange, selectedEngineer]);
-
-  // Calculate daily work from work logs
-  const calculateDailyWork = React.useMemo(() => {
-    if (!lifecycleTrends?.daily_trends) {
-      console.log('No daily trends data available');
-      return {};
+    if (dateFilteredTickets.length > 0) {
+      fetchWorkLogs();
     }
-    
-    console.log('Lifecycle trends:', lifecycleTrends);
-    
-    const dailyWork = {};
-    
-    Object.entries(lifecycleTrends.daily_trends)
-      .filter(([date]) => {
-        const trendDate = new Date(date);
-        const isInRange = trendDate >= getDateRange.start && trendDate <= getDateRange.end;
-        console.log(`Date ${date} in range: ${isInRange}`);
-        return isInRange;
-      })
-      .forEach(([date, data]) => {
-        console.log(`Processing date ${date}:`, data);
-        
-        if (!data.work_logs) {
-          console.log(`No work logs for date ${date}`);
-          return;
-        }
-        
-        // Filter work logs for selected engineer
-        const engineerLogs = selectedEngineer 
-          ? data.work_logs.filter(log => log.author === selectedEngineer)
-          : data.work_logs;
-        
-        console.log('Filtered engineer logs:', engineerLogs);
-        
-        if (engineerLogs.length > 0) {
-          dailyWork[date] = {
-            totalHours: engineerLogs.reduce((sum, log) => sum + (log.hours || 0), 0),
-            tickets: new Set(engineerLogs.map(log => log.ticket_key)),
-            details: engineerLogs.map(log => ({
-              ticket: log.ticket_key,
-              summary: log.summary,
-              hours: log.hours || 0,
-              comment: log.comment,
-              status: log.status,
-              project: log.project
-            }))
-          };
-          console.log(`Daily work for ${date}:`, dailyWork[date]);
-        }
-      });
-    
-    console.log('Final daily work data:', dailyWork);
-    return dailyWork;
-  }, [lifecycleTrends, selectedEngineer, getDateRange]);
-
-  // Calculate engineer-specific performance metrics
-  const engineerMetrics = React.useMemo(() => {
-    if (!selectedEngineer) return performanceMetrics;
-    
-    const dailyWork = calculateDailyWork;
-    const totalDays = Object.keys(dailyWork).length || 1; // Avoid division by zero
-    
-    return {
-      avg_time_to_start: tickets.reduce((acc, t) => acc + t.time_to_start, 0) / (tickets.length || 1),
-      avg_time_to_complete: tickets.reduce((acc, t) => acc + t.time_to_complete, 0) / (tickets.length || 1),
-      in_progress_tickets: tickets.filter(t => t.status === 'In Progress').length,
-      completed_tickets: tickets.filter(t => ['Done', 'Closed'].includes(t.status)).length,
-      avg_daily_work_hours: Object.values(dailyWork).reduce((acc, day) => acc + day.totalHours, 0) / totalDays,
-      avg_daily_tickets: Object.values(dailyWork).reduce((acc, day) => acc + day.tickets.size, 0) / totalDays
-    };
-  }, [tickets, selectedEngineer, performanceMetrics, calculateDailyWork]);
-
-  // Filter tickets for the selected engineer
-  const engineerTickets = React.useMemo(() => {
-    if (!selectedEngineer) return tickets;
-    return tickets.filter(ticket => ticket.assignee === selectedEngineer);
-  }, [tickets, selectedEngineer]);
+  }, [dateFilteredTickets]);
 
   const formatDate = (dateStr) => {
     if (!dateStr) return '';
     const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { 
-      month: 'short', 
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
       day: 'numeric',
       year: 'numeric'
     });
   };
 
   const formatDuration = (hours) => {
-    if (!hours) return '0h';
-    const days = Math.floor(hours / 24);
-    const remainingHours = Math.round(hours % 24);
-    if (days === 0) return `${remainingHours}h`;
-    return `${days}d ${remainingHours}h`;
+    const h = Math.floor(hours);
+    const m = Math.round((hours - h) * 60);
+    if (h == 0 && m == 0) return `${h}h`
+    if (h == 0 && m > 0) return `0h ${m}m`
+    else if (m > 0) return `${h}h ${m}m`
+    else return `${h}h`
   };
 
   const calculateProgress = (logged, estimate) => {
     if (!estimate || !logged) return 0;
     return Math.min(Math.round((logged / estimate) * 100), 100);
   };
+  const calculateProgressBar = (logged, estimate) => {
+    if (!estimate || !logged) return 0;
+    return Math.round((logged / estimate) * 100) > 100 ? 100 - Math.round((logged / estimate) * 100) : Math.round((logged / estimate) * 100)
+  };
 
-  const CURRENT_STATUSES = ['To Do', 'Start', 'In Progress', 'In Review', 'Blocked', 'Hold'];
+  // const CURRENT_STATUSES = ['To Do', 'Start', 'In Progress', 'In Review', 'Blocked', 'Hold'];
+  const CURRENT_STATUSES = ['Done', 'Closed'];
 
   // Update the currentTickets useMemo to filter by selectedEngineer
   const currentTickets = React.useMemo(() => {
     return tickets
-      .filter(ticket => 
-        CURRENT_STATUSES.includes(ticket.status) &&
+      .filter(ticket =>
+        !CURRENT_STATUSES.includes(ticket.status) &&
         (!selectedEngineer || ticket.assignee === selectedEngineer) // Add assignee filter
-      )
-      .sort((a, b) => new Date(b.updated) - new Date(a.updated));
+      ).sort((a, b) => new Date(b.updated) - new Date(a.updated));
   }, [tickets, CURRENT_STATUSES, selectedEngineer]); // Add selectedEngineer to dependencies
 
   // Update the completedTickets useMemo to filter by selectedEngineer
-  const completedTickets = React.useMemo(() => 
+  const completedTickets = React.useMemo(() =>
     dateFilteredTickets
-      .filter(t => 
+      .filter(t =>
         ['Done', 'Closed'].includes(t.status) &&
         (!selectedEngineer || t.assignee === selectedEngineer) // Add assignee filter
-      )
-  , [dateFilteredTickets, selectedEngineer]); // Add selectedEngineer to dependencies
-
-  const lifecycleData = [
-    {
-      name: 'Time to Start',
-      value: performanceMetrics.avg_time_to_start
-    },
-    {
-      name: 'Time to Complete',
-      value: performanceMetrics.avg_time_to_complete
-    }
-  ];
-
-  const calculateEfficiency = (estimate, logged) => {
-    // Return 'N/A' if no estimate
-    if (!estimate) return 'N/A';
-    
-    // Return '0%' if no time logged
-    if (!logged) return '0%';
-    
-    // Calculate efficiency as percentage
-    const efficiency = (estimate / logged) * 100;
-    
-    // Handle extreme cases
-    if (efficiency > 200) return '>200%';
-    if (efficiency < 0) return '0%';
-    
-    return `${Math.round(efficiency)}%`;
-  };
+      ).sort((a, b) => new Date(b.completion_date) - new Date(a.completion_date))
+    , [dateFilteredTickets, selectedEngineer]); // Add selectedEngineer to dependencies
 
   const getStatusColor = (status) => {
-    switch(status.toLowerCase()) {
+    switch (status.toLowerCase()) {
       case 'in progress':
         return '#1976d2'; // blue
       case 'blocked':
@@ -302,18 +182,13 @@ export default function TicketLifecycleMetrics({
   // Transform and filter trends data for the selected engineer
   const chartData = React.useMemo(() => {
     if (!lifecycleTrends?.daily_trends) return [];
-
     return Object.entries(lifecycleTrends.daily_trends)
-      .filter(([date]) => {
-        const trendDate = new Date(date);
-        return trendDate >= getDateRange.start && trendDate <= getDateRange.end;
-      })
       .map(([date, data]) => {
         // If no engineer selected, use total data
         if (!selectedEngineer) {
           return {
-            date: new Date(date).toLocaleDateString('en-US', { 
-              month: 'short', 
+            date: new Date(date).toLocaleDateString('en-US', {
+              month: 'short',
               day: 'numeric'
             }),
             completion: data.completion_hours,
@@ -323,89 +198,33 @@ export default function TicketLifecycleMetrics({
           };
         }
 
-        // Filter data for selected engineer
-        const engineerTicketsForDay = engineerTickets.filter(ticket => {
-          const ticketDate = new Date(ticket.created).toISOString().split('T')[0];
-          return ticketDate === date;
-        });
-
-        const completion = engineerTicketsForDay.reduce((acc, ticket) => 
-          acc + (ticket.time_to_complete || 0), 0);
-
         return {
-          date: new Date(date).toLocaleDateString('en-US', { 
-            month: 'short', 
-            day: 'numeric'
-          }),
-          completion: completion,
+          date: new Date(date).toLocaleDateString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: '2-digit'
+          }).replace(',', ''),
+          completion: data.cycle_time,
           available: 8, // 8 hours per day for individual engineer
-          variance: completion > 0 ? ((completion - 8) / 8) * 100 : -100,
-          active: engineerTicketsForDay.length
+          // variance: completion > 0 ? ((completion - 8) / 8) * 100 : -100,
+          variance: data.efficiency,
+          activeTask: data.active_tasks,
+          completeTask: data.completed_tasks
         };
       })
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
-  }, [lifecycleTrends, selectedEngineer, engineerTickets, getDateRange]);
-
-  // Calculate work hours based on status transitions
-  const calculateWorkHours = (ticket) => {
-    const statusChanges = ticket.changelog?.filter(log => 
-      log.field === 'status' && 
-      ['In Progress', 'In Review'].includes(log.toString)
-    );
-
-    if (!statusChanges?.length) return 0;
-
-    let totalHours = 0;
-    statusChanges.forEach(change => {
-      const startTime = new Date(change.created);
-      const nextChange = ticket.changelog.find(log => 
-        log.field === 'status' && 
-        log.created > change.created && 
-        !['In Progress', 'In Review'].includes(log.toString)
-      );
-      
-      const endTime = nextChange ? new Date(nextChange.created) : new Date();
-      const hours = (endTime - startTime) / (1000 * 60 * 60);
-      
-      // Cap at 8 hours per day and exclude non-working hours
-      totalHours += Math.min(getWorkingHours(hours), 8);
-    });
-
-    return totalHours;
-  };
-
-  // Calculate working hours excluding nights and weekends
-  const getWorkingHours = (totalHours) => {
-    const WORK_START_HOUR = 9; // 9 AM
-    const WORK_END_HOUR = 17; // 5 PM
-    
-    let workingHours = 0;
-    let currentDate = new Date();
-    
-    for (let hour = 0; hour < totalHours; hour++) {
-      const hourOfDay = (WORK_START_HOUR + hour) % 24;
-      const isWorkingHour = hourOfDay >= WORK_START_HOUR && hourOfDay < WORK_END_HOUR;
-      const isWeekend = currentDate.getDay() === 0 || currentDate.getDay() === 6;
-      
-      if (isWorkingHour && !isWeekend) {
-        workingHours++;
-      }
-    }
-    
-    return workingHours;
-  };
+  }, [lifecycleTrends, selectedEngineer, getDateRange]);
 
   const renderDailyWorkDetails = () => {
-    if (isLoadingWorkLogs) {
-      return (
-        <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center' }}>
-          <CircularProgress />
-        </Box>
-      );
-    }
+    // if (isLoadingWorkLogs) {
+    //   return (
+    //     <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center' }}>
+    //       <CircularProgress />
+    //     </Box>
+    //   );
+    // }
 
     const entries = Object.entries(workLogs);
-    
+
     if (entries.length === 0) {
       return (
         <Box sx={{ mt: 3 }}>
@@ -459,9 +278,9 @@ export default function TicketLifecycleMetrics({
                         <Typography key={idx} variant="caption" display="block">
                           {log.ticket_key}: {log.hours}h - {log.summary}
                           {log.comment && (
-                            <Typography 
-                              component="span" 
-                              color="text.secondary" 
+                            <Typography
+                              component="span"
+                              color="text.secondary"
                               sx={{ ml: 1, fontSize: 'inherit' }}
                             >
                               ({log.comment.replace(/\[work:.*?\]/, '').trim()})
@@ -489,35 +308,42 @@ export default function TicketLifecycleMetrics({
         </Box>
       );
     }
-
-    switch(selectedMetric) {
+    switch (selectedMetric) {
       case 'completion':
         return (
           <ResponsiveContainer width="100%" height={400}>
             <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="date" />
-              <YAxis />
-              <RechartsTooltip 
+              <YAxis
+                domain={['auto', 'auto']}
+                label={{
+                  value: 'Number of Resources',
+                  angle: -90,
+                  position: 'insideLeft',
+                  offset: 2
+                }}
+              />
+              <RechartsTooltip
                 content={({ active, payload, label }) => {
                   if (!active || !payload || !payload.length) return null;
                   return (
-                    <Box sx={{ 
-                      bgcolor: 'background.paper', 
-                      p: 1, 
-                      border: 1, 
+                    <Box sx={{
+                      bgcolor: 'background.paper',
+                      p: 1,
+                      border: 1,
                       borderColor: 'grey.300',
                       borderRadius: 1
                     }}>
                       <Typography variant="body2">{label}</Typography>
                       {payload.map((entry, index) => (
-                        <Typography 
-                          key={index} 
-                          variant="body2" 
+                        <Typography
+                          key={index}
+                          variant="body2"
                           sx={{ color: entry.color }}
                         >
-                          {`${entry.name}: ${selectedView === 'hours' 
-                            ? `${entry.value.toFixed(1)}h` 
+                          {`${entry.name}: ${selectedView === 'hours'
+                            ? ['Completion Hours'].includes(entry.name) ? formatDuration(entry.value) : `${entry.value}`
                             : `${entry.value.toFixed(1)}%`}`}
                         </Typography>
                       ))}
@@ -528,27 +354,41 @@ export default function TicketLifecycleMetrics({
               <Legend />
               {selectedView === 'hours' ? (
                 <>
-                  <Line 
-                    type="monotone" 
-                    dataKey="completion" 
-                    name="Completion Hours" 
-                    stroke="#82ca9d" 
+                  <Line
+                    type="monotone"
+                    dataKey="activeTask"
+                    name="Active Task"
+                    stroke="#2ee816"
                     dot={false}
                   />
-                  <Line 
-                    type="monotone" 
-                    dataKey="available" 
-                    name="Available Hours" 
-                    stroke="#8884d8" 
+                  <Line
+                    type="monotone"
+                    dataKey="completeTask"
+                    name="Complete Task"
+                    stroke="#f38598"
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="completion"
+                    name="Completion Hours"
+                    stroke="#82ca9d"
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="available"
+                    name="Available Hours"
+                    stroke="#8884d8"
                     dot={false}
                   />
                 </>
               ) : (
-                <Line 
-                  type="monotone" 
-                  dataKey="variance" 
-                  name="Variance %" 
-                  stroke="#ff7300" 
+                <Line
+                  type="monotone"
+                  dataKey="variance"
+                  name="Variance %"
+                  stroke="#ff7300"
                   dot={false}
                 />
               )}
@@ -563,26 +403,26 @@ export default function TicketLifecycleMetrics({
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="date" />
               <YAxis />
-              <RechartsTooltip 
+              <RechartsTooltip
                 content={({ active, payload, label }) => {
                   if (!active || !payload || !payload.length) return null;
                   return (
-                    <Box sx={{ 
-                      bgcolor: 'background.paper', 
-                      p: 1, 
-                      border: 1, 
+                    <Box sx={{
+                      bgcolor: 'background.paper',
+                      p: 1,
+                      border: 1,
                       borderColor: 'grey.300',
                       borderRadius: 1
                     }}>
                       <Typography variant="body2">{label}</Typography>
                       {payload.map((entry, index) => (
-                        <Typography 
-                          key={index} 
-                          variant="body2" 
+                        <Typography
+                          key={index}
+                          variant="body2"
                           sx={{ color: entry.color }}
                         >
-                          {`${entry.name}: ${selectedView === 'hours' 
-                            ? `${entry.value.toFixed(1)}h` 
+                          {`${entry.name}: ${selectedView === 'hours'
+                            ? `${entry.value.toFixed(1)}h`
                             : `${entry.value.toFixed(1)}%`}`}
                         </Typography>
                       ))}
@@ -609,7 +449,8 @@ export default function TicketLifecycleMetrics({
       default:
         return null;
     }
-  };
+  }
+  
 
   return (
     <Card sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -618,8 +459,8 @@ export default function TicketLifecycleMetrics({
           Ticket Lifecycle Metrics {selectedEngineer ? `- ${selectedEngineer}` : ''}
         </Typography>
 
-        <Tabs 
-          value={selectedTab} 
+        <Tabs
+          value={selectedTab}
           onChange={(_, newValue) => setSelectedTab(newValue)}
           sx={{ mb: 2 }}
         >
@@ -638,72 +479,39 @@ export default function TicketLifecycleMetrics({
                   onChange={(_, value) => value && setSelectedMetric(value)}
                   size="small"
                 >
-                  <ToggleButton value="completion">Completion Trends</ToggleButton>
-                  <ToggleButton value="projects">Project Distribution</ToggleButton>
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="completion">Completion Trends</ToggleButton>
+                  </Tooltip>
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="projects">Project Distribution</ToggleButton>
+                  </Tooltip>
                 </ToggleButtonGroup>
 
-                <ToggleButtonGroup
+                {selectedMetric === "completion" && <ToggleButtonGroup
                   value={selectedView}
                   exclusive
                   onChange={(_, value) => value && setSelectedView(value)}
                   size="small"
                   sx={{ ml: 2 }}
                 >
-                  <ToggleButton value="hours">Hours</ToggleButton>
-                  <ToggleButton value="percentage">Percentage</ToggleButton>
-                </ToggleButtonGroup>
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="hours">Hours</ToggleButton>
+                  </Tooltip>
+                  <Tooltip title="Represents the average absolute deviation from the estimated value.">
+                    <ToggleButton value="percentage">Percentage</ToggleButton>
+                  </Tooltip>
+                </ToggleButtonGroup>}
+
               </Box>
 
               <Box sx={{ flex: 1, minHeight: 400 }}>
-                {selectedMetric === 'completion' ? (
-                  renderChart()
-                ) : (
-                  <ProjectDistributionChart 
+                {selectedMetric === 'completion' ? ( renderChart() ) : (
+                  <ProjectDistributionChart
                     currentTickets={currentTickets}
                     completedTickets={completedTickets}
                     selectedEngineer={selectedEngineer}
                   />
                 )}
-              </Box>
-
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" gutterBottom>
-                  Performance Summary
-                </Typography>
-                <Grid container spacing={2}>
-                  <Grid item xs={6} md={3}>
-                    <Typography variant="caption" color="text.secondary" display="block">
-                      Avg Time to Start
-                    </Typography>
-                    <Typography>
-                      {formatDuration(engineerMetrics.avg_time_to_start)}
-                    </Typography>
-                  </Grid>
-                  <Grid item xs={6} md={3}>
-                    <Typography variant="caption" color="text.secondary" display="block">
-                      Avg Time to Complete
-                    </Typography>
-                    <Typography>
-                      {formatDuration(engineerMetrics.avg_time_to_complete)}
-                    </Typography>
-                  </Grid>
-                  <Grid item xs={6} md={3}>
-                    <Typography variant="caption" color="text.secondary" display="block">
-                      Current Tasks
-                    </Typography>
-                    <Typography>
-                      {engineerMetrics.in_progress_tickets}
-                    </Typography>
-                  </Grid>
-                  <Grid item xs={6} md={3}>
-                    <Typography variant="caption" color="text.secondary" display="block">
-                      Completed Tasks
-                    </Typography>
-                    <Typography>
-                      {engineerMetrics.completed_tickets}
-                    </Typography>
-                  </Grid>
-                </Grid>
               </Box>
 
               {renderDailyWorkDetails()}
@@ -712,9 +520,9 @@ export default function TicketLifecycleMetrics({
 
           {selectedTab === 1 && (
             <TableContainer sx={{ height: '100%', overflow: 'auto' }}>
-              <TableContainer 
-                component={Paper} 
-                sx={{ 
+              <TableContainer
+                component={Paper}
+                sx={{
                   maxHeight: '100%',
                   overflow: 'auto',
                   '&::-webkit-scrollbar': {
@@ -737,10 +545,12 @@ export default function TicketLifecycleMetrics({
                   <TableHead>
                     <TableRow>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>Ticket</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Type</TableCell>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>Summary</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Due Date</TableCell>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>Status</TableCell>
-                      <TableCell sx={{ bgcolor: 'background.paper' }}>Estimate</TableCell>
-                      <TableCell sx={{ bgcolor: 'background.paper' }}>Time Logged</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Logged Time</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Original Estimate</TableCell>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>Progress</TableCell>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>Actions</TableCell>
                     </TableRow>
@@ -748,8 +558,8 @@ export default function TicketLifecycleMetrics({
                   <TableBody>
                     {currentTickets.map(ticket => (
                       <TableRow key={ticket.key}>
-                        <TableCell>
-                          <Link 
+                        <TableCell width={100}>
+                          <Link
                             href={`${JIRA_BASE_URL}/${ticket.key}`}
                             target="_blank"
                             rel="noopener noreferrer"
@@ -758,8 +568,10 @@ export default function TicketLifecycleMetrics({
                             {ticket.key}
                           </Link>
                         </TableCell>
-                        <TableCell>{ticket.summary}</TableCell>
-                        <TableCell>
+                        <TableCell>{ticket.issue_type}</TableCell>
+                        <TableCell width={350}>{ticket.summary}</TableCell>
+                        <TableCell width={120}>{ticket.due_date || "N/A"}</TableCell>
+                        <TableCell width={130}>
                           <Box
                             component="span"
                             sx={{
@@ -775,8 +587,8 @@ export default function TicketLifecycleMetrics({
                             {ticket.status}
                           </Box>
                         </TableCell>
-                        <TableCell>{formatDuration(ticket.estimate)}</TableCell>
                         <TableCell>{formatDuration(ticket.logged)}</TableCell>
+                        <TableCell>{formatDuration(ticket.estimate)}</TableCell>
                         <TableCell>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                             <LinearProgress
@@ -785,7 +597,7 @@ export default function TicketLifecycleMetrics({
                               sx={{ flexGrow: 1 }}
                             />
                             <Typography variant="caption">
-                              {calculateProgress(ticket.logged, ticket.estimate)}%
+                              {calculateProgressBar(ticket.logged, ticket.estimate)}%
                             </Typography>
                           </Box>
                         </TableCell>
@@ -803,6 +615,13 @@ export default function TicketLifecycleMetrics({
                         </TableCell>
                       </TableRow>
                     ))}
+                    {currentTickets.length === 0 && (
+                      <TableRow sx={{ height: '100%' }}>
+                        <TableCell colSpan={9} sx={{ textAlign: 'center', verticalAlign: 'middle' }}>
+                          <b>No Data Found</b>
+                        </TableCell>
+                      </TableRow>
+                    )}
                   </TableBody>
                 </Table>
               </TableContainer>
@@ -811,9 +630,9 @@ export default function TicketLifecycleMetrics({
 
           {selectedTab === 2 && (
             <TableContainer sx={{ height: '100%', overflow: 'auto' }}>
-              <TableContainer 
+              <TableContainer
                 component={Paper}
-                sx={{ 
+                sx={{
                   maxHeight: '100%',
                   overflow: 'auto',
                   '&::-webkit-scrollbar': {
@@ -836,9 +655,12 @@ export default function TicketLifecycleMetrics({
                   <TableHead>
                     <TableRow>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>Ticket</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Type</TableCell>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>Summary</TableCell>
-                      <TableCell sx={{ bgcolor: 'background.paper' }}>Time to Start</TableCell>
-                      <TableCell sx={{ bgcolor: 'background.paper' }}>Time to Complete</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Due Date</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Complete Date</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Logged Time</TableCell>
+                      <TableCell sx={{ bgcolor: 'background.paper' }}>Original Estimate</TableCell>
                       <TableCell sx={{ bgcolor: 'background.paper' }}>
                         <Tooltip title="Ratio of estimated time to actual time taken">
                           <span>Efficiency</span>
@@ -849,8 +671,8 @@ export default function TicketLifecycleMetrics({
                   <TableBody>
                     {completedTickets.map(ticket => (
                       <TableRow key={ticket.key}>
-                        <TableCell>
-                          <Link 
+                        <TableCell width={100}>
+                          <Link
                             href={`${JIRA_BASE_URL}/${ticket.key}`}
                             target="_blank"
                             rel="noopener noreferrer"
@@ -859,14 +681,33 @@ export default function TicketLifecycleMetrics({
                             {ticket.key}
                           </Link>
                         </TableCell>
-                        <TableCell>{ticket.summary}</TableCell>
-                        <TableCell>{formatDuration(ticket.time_to_start)}</TableCell>
-                        <TableCell>{formatDuration(ticket.time_to_complete)}</TableCell>
+                        <TableCell>{ticket.issue_type}</TableCell>
+                        <TableCell width={350}>{ticket.summary}</TableCell>
+                        <TableCell>{ticket.due_date || "N/A"}</TableCell>
+                        <TableCell>{ticket.completion_date || "N/A"}</TableCell>
+                        <TableCell width={100}>{formatDuration(ticket.logged)}</TableCell>
+                        <TableCell width={100}>{formatDuration(ticket.estimate)}</TableCell>
                         <TableCell>
-                          {calculateProgress(ticket.estimate, ticket.logged)}%
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <LinearProgress
+                              variant="determinate"
+                              value={calculateProgress(ticket.logged, ticket.estimate)}
+                              sx={{ flexGrow: 1 }}
+                            />
+                            <Typography variant="caption">
+                              {calculateProgressBar(ticket.logged, ticket.estimate)}%
+                            </Typography>
+                          </Box>
                         </TableCell>
                       </TableRow>
                     ))}
+                    {completedTickets.length === 0 && (
+                      <TableRow sx={{ height: '100%' }}>
+                        <TableCell colSpan={8} sx={{ textAlign: 'center', verticalAlign: 'middle' }}>
+                          <b>No Data Found</b>
+                        </TableCell>
+                      </TableRow>
+                    )}
                   </TableBody>
                 </Table>
               </TableContainer>
